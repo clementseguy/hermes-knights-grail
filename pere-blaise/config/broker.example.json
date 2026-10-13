@@ -1,0 +1,11 @@
+{
+  "database": "/Users/REPLACE_ME/Library/Application Support/HermesAgents/runtime/pere-blaise/plans.sqlite3",
+  "runtime_dir": "/Users/REPLACE_ME/Library/Application Support/HermesAgents/runtime/pere-blaise/runtime",
+  "socket": "/Users/REPLACE_ME/Library/Application Support/HermesAgents/runtime/pere-blaise/broker.sock",
+  "executor": "/Users/REPLACE_ME/HermesAgents/deployments/pere-blaise/scripts/apply-organize-plan-v2.py",
+  "plan_ttl_hours": 12,
+  "sha256_max_bytes": 1073741824,
+  "retention_days": 30,
+  "telegram_allowed_user_ids": ["REPLACE_ME"],
+  "slack_allowed_user_ids": ["REPLACE_ME"]
+}

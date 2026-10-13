@@ -1,0 +1,23 @@
+# Configuration du conteneur Hermes de Père Blaise.
+# Les données de bibliothèque arrivent déjà réduites dans la requête API : aucun outil de fichier n'est requis.
+model:
+  provider: openai-codex
+  default: gpt-5.4
+
+platform_toolsets:
+  api_server: []
+
+# Exception approuvée le 2026-10-13 : l'apprentissage spécialisé SQLite local
+# (trois mois, consultable via `apprentissages`) remplace la mémoire générale.
+# Motif : ne pas faire retenir ou exposer de métadonnées Documents non nécessaires.
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+
+agent:
+  max_turns: 4
+  verbose: false
+
+gateway:
+  allow_all_users: false
+  media_delivery_allow_dirs: []

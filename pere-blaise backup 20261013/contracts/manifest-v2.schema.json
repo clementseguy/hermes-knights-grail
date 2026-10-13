@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hermes organization manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "actions"],
+  "properties": {
+    "version": {"const": 2},
+    "actions": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source", "destination", "expected"],
+        "properties": {
+          "source": {"type": "string", "minLength": 1},
+          "destination": {"type": "string", "minLength": 1},
+          "expected": {
+            "type": "object", "additionalProperties": false,
+            "required": ["device", "inode", "size", "mtime_ns", "sha256"],
+            "properties": {
+              "device": {"type": "integer", "minimum": 0},
+              "inode": {"type": "integer", "minimum": 0},
+              "size": {"type": "integer", "minimum": 0},
+              "mtime_ns": {"type": "integer", "minimum": 0},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

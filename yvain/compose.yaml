@@ -1,0 +1,37 @@
+name: hermes-yvain
+
+services:
+  yvain:
+    image: nousresearch/hermes-agent@sha256:9774f4f39a9bb8c2f68ce728ed5e99ddbad282163be56764afacf88ed952b784
+    container_name: hermes-yvain
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - >-
+        cp /yvain/config.yaml /opt/data/config.yaml &&
+        cp /yvain/yvain-policy.md /opt/data/yvain-policy.md &&
+        mkdir -p /opt/data/skills/yvain &&
+        cp /yvain/skills/yvain/SKILL.md /opt/data/skills/yvain/SKILL.md &&
+        exec hermes gateway run
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 1536m
+    environment:
+      HERMES_UID: ${HERMES_UID}
+      HERMES_GID: ${HERMES_GID}
+      HERMES_HOME: /opt/data
+    volumes:
+      - yvain-data:/opt/data
+      # Hermes owns /opt/data and can migrate its configuration there. The
+      # versioned Yvain inputs remain immutable under /yvain.
+      - ./runtime:/yvain:ro
+      - ./reports:/reports
+      - ${NEXTARGET_APP_DIR}:/workspace/NexTarget-app:ro
+      - ${NEXTARGET_SERVER_DIR}:/workspace/NexTarget-server:ro
+    # The host-side runner owns Android Emulator and Docker Desktop. No Docker
+    # socket or production secret is exposed to the Hermes container.
+
+volumes:
+  yvain-data:
+    name: hermes-yvain-data

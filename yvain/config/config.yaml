@@ -1,0 +1,21 @@
+model:
+  provider: openai-codex
+  default: gpt-6-luna
+
+agent:
+  max_turns: 18
+  reasoning_effort: medium
+
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+
+platform_toolsets:
+  api_server:
+    - terminal
+    - browser
+
+gateway:
+  allow_all_users: false
+  media_delivery_allow_dirs:
+    - /reports

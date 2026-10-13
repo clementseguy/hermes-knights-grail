@@ -1,0 +1,25 @@
+appId: com.example.tir_sportif
+---
+# NT-149 — parcours utilisateur complet : export dans un dossier puis partage.
+# L'état local est remis à zéro par le lanceur avant ce scénario.
+- launchApp:
+    clearState: true
+- tapOn: "Passer"
+- tapOn:
+    point: "90%,94%"
+- extendedWaitUntil:
+    visible: "Sauvegardes & Portabilité"
+    timeout: 10000
+
+# Le sélecteur Android doit proposer le nom par défaut exigé par NT-149.
+- tapOn: "Enregistrer le fichier"
+- assertVisible: "nextarget_export_.*\\.json"
+- takeScreenshot: nt149-save-name-proposed
+- tapOn: "SAVE"
+- assertVisible: "Fichier enregistré: nextarget_export_.*\\.json"
+- takeScreenshot: nt149-save-confirmed
+
+# Le même nom doit accompagner le fichier transmis à la feuille de partage.
+- tapOn: "Exporter (.json)"
+- assertVisible: "nextarget_export_.*\\.json"
+- takeScreenshot: nt149-share-name-proposed

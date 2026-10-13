@@ -1,0 +1,36 @@
+appId: com.example.tir_sportif
+---
+# NT-141 / NT-148 — contrôle du premier bloc et de l'ordre des réglages.
+# Le thème France est contrôlé par le flux complémentaire à écrire quand la
+# fixture de changement de thème sera disponible.
+- launchApp:
+    clearState: true
+- tapOn: "Passer"
+- tapOn:
+    point: "90%,94%"
+- assertVisible: "Paramètres"
+- assertVisible: "Préférences Tir"
+- assertVisible:
+    id: "qa.settings.default_hand"
+- assertVisible:
+    id: "qa.settings.weapon_rack"
+- assertVisible:
+    id: "qa.settings.default_caliber"
+- takeScreenshot: nt141-148-preferences-order
+- scrollUntilVisible:
+    element: "Sauvegardes & Portabilité"
+    direction: DOWN
+- assertVisible: "Sauvegardes & Portabilité"
+- scrollUntilVisible:
+    element: "Coach IA"
+    direction: DOWN
+- assertVisible: "Coach IA"
+- scrollUntilVisible:
+    element: "Thème"
+    direction: DOWN
+- assertVisible: "Thème"
+- scrollUntilVisible:
+    element: "Aide"
+    direction: DOWN
+- assertVisible: "Aide"
+- takeScreenshot: nt141-sections

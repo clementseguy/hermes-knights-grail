@@ -1,0 +1,14 @@
+appId: com.example.tir_sportif
+---
+# NT-057 — smoke minimal après onboarding, sur largeur mobile.
+# Les contrôles des deux thèmes et des détails de session sont séparés afin de
+# ne pas confondre une absence de données avec une régression de navigation.
+- launchApp:
+    clearState: true
+- tapOn: "Passer"
+- assertVisible: "Sessions"
+- tapOn:
+    point: "90%,94%"
+- assertVisible: "Paramètres"
+- assertVisible: "Préférences Tir"
+- takeScreenshot: nt057-settings-smoke

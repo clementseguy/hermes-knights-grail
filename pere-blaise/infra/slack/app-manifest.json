@@ -1,0 +1,25 @@
+{
+  "display_information": {
+    "name": "Hermes — Père Blaise",
+    "description": "Classe les téléchargements locaux avec validation humaine.",
+    "background_color": "#1D1C1D"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Père Blaise",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": ["app_mentions:read", "chat:write"]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": ["app_mention"]
+    },
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

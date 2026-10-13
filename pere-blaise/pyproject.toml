@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=69,<70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pere-blaise"
+version = "0.1.0"
+description = "Local, capability-limited control plane for Hermes file organization"
+requires-python = ">=3.9"
+dependencies = [
+  "websocket-client>=1.8,<2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

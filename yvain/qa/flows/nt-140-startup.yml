@@ -1,0 +1,12 @@
+appId: com.example.tir_sportif
+---
+# NT-140 — premier démarrage : le splash natif mène directement à l'onboarding.
+# Les variantes authentifiée, callback OAuth et configuration invalide restent
+# hors de ce flux : elles exigent des états de test fournis par l'application.
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible: "Passer"
+    timeout: 10000
+- assertVisible: "Passer"
+- takeScreenshot: nt140-first-launch-onboarding

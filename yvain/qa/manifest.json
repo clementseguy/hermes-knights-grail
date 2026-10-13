@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "stories": {
+    "NT-057": {
+      "scope": "app",
+      "status": "draft",
+      "cases": [
+        {
+          "id": "NT-057-smoke-navigation",
+          "kind": "maestro",
+          "target": "qa/flows/nt-057-smoke-navigation.yml"
+        }
+      ]
+    },
+    "NT-140": {
+      "scope": "app",
+      "status": "draft",
+      "cases": [
+        {
+          "id": "NT-140-first-launch",
+          "kind": "maestro",
+          "target": "qa/flows/nt-140-startup.yml"
+        }
+      ]
+    },
+    "NT-141": {
+      "scope": "app",
+      "status": "draft",
+      "cases": [
+        {
+          "id": "NT-141-148-settings-order",
+          "kind": "maestro",
+          "target": "qa/flows/nt-141-148-settings.yml"
+        }
+      ]
+    },
+    "NT-148": {
+      "scope": "app",
+      "status": "draft",
+      "cases": [
+        {
+          "id": "NT-141-148-settings-separators",
+          "kind": "maestro",
+          "target": "qa/flows/nt-141-148-settings.yml"
+        }
+      ]
+    },
+    "NT-149": {
+      "scope": "app",
+      "status": "ready",
+      "cases": [
+        {
+          "id": "NT-149-export-real-user-flow",
+          "kind": "maestro",
+          "target": "qa/flows/nt-149-export.yml"
+        },
+        {
+          "id": "NT-149-export-filenames-and-json",
+          "kind": "flutter_test",
+          "target": "test/services/backup_service_export_test.dart"
+        },
+        {
+          "id": "NT-149-export-folder-and-suggested-name",
+          "kind": "flutter_test",
+          "target": "test/services/backup_service_export_folder_test.dart"
+        }
+      ]
+    },
+    "NT-049": {"scope": "server", "status": "out_of_scope", "cases": []},
+    "NT-071": {"scope": "server", "status": "out_of_scope", "cases": []}
+  }
+}

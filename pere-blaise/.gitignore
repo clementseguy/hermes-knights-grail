@@ -1,0 +1,19 @@
+# Environnement local et caches Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# État et secrets d'exécution : ils vivent dans ~/Library/Application Support/HermesAgents/runtime/pere-blaise
+*.env
+*.sqlite3
+*.sock
+runtime/
+telegram-offset
+slack.env
+planner-auth.json
+broker.json
+
+# Sorties de génération locales
+launchd-preview/
+*.log
