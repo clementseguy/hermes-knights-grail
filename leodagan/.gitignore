@@ -1,0 +1,12 @@
+# Hermes runtime state and credentials
+runtime/
+.env
+auth.json
+
+# Generated review editions. Keep the empty directory in the project.
+review-inbox/*
+!review-inbox/.gitkeep
+
+# Local caches
+__pycache__/
+*.py[cod]

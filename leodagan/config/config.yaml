@@ -1,0 +1,23 @@
+model:
+  provider: openai-codex
+  default: gpt-6-luna
+
+agent:
+  max_turns: 14
+  reasoning_effort: low
+
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+
+# Keep the agent's exposure small: it consults public sources through short,
+# explicit terminal commands and writes a local review bundle. Browser, image
+# generation and external messaging are intentionally not enabled.
+platform_toolsets:
+  api_server:
+    - terminal
+
+gateway:
+  allow_all_users: false
+  media_delivery_allow_dirs:
+    - /review-inbox
