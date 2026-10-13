@@ -10,12 +10,11 @@ et ne sont pas versionnés.
 
 ## Agents
 
-- **Père Blaise** — assistant personnel local pour proposer puis appliquer,
+- **Père Blaise** : assistant personnel local pour proposer puis appliquer,
   après validation, le classement de fichiers et leur envoi depuis un périmètre
   défini.
-- **Léodagan** — agent de veille qui prépare des éditions LinkedIn sourcées sur
-  l'IA agentique et la souveraineté européenne, sans publication automatique.
-- **Yvain** — agent de recette pour les parcours mobiles et les rapports de
+- **Léodagan** : agent de veille qui prépare des posts sourcées, sans publication automatique.
+- **Yvain** : agent de recette pour les parcours mobiles et les rapports de
   validation associés.
 
 ## Organisation
