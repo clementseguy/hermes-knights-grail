@@ -16,5 +16,6 @@
   "slack_allowed_channel_id": "",
   "identity_map": {},
   "weekly_owner": "",
+  "weekly_telegram_chat": "",
   "weekly_enabled": false
 }

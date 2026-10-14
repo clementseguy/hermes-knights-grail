@@ -29,8 +29,6 @@ def parse_message(text: str) -> Optional[Command]:
     normalized = " ".join(text.strip().split())
     if normalized.casefold() == "analyse":
         return Command("analyse")
-    if normalized.casefold() == "apprentissages":
-        return Command("learning")
     for name, expression in (("detail", DETAIL), ("range", RANGE)):
         matched = expression.fullmatch(normalized)
         if matched:

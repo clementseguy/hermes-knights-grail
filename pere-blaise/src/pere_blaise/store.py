@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import secrets
 import sqlite3
-import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,7 +13,6 @@ from typing import Any, Iterator, Optional
 from .contracts import PLAN_ADJECTIVES, PLAN_NOUNS, canonical_manifest, canonical_plan_id, fingerprint, manifest_digest, parse_manifest
 
 DEFAULT_SHA256_MAX_BYTES = 1024 * 1024 * 1024
-LEARNING_RETENTION_DAYS = 90
 
 
 class PlanStore:
@@ -26,7 +23,7 @@ class PlanStore:
         self.database, self.sha256_max_bytes = database, sha256_max_bytes
         with self._connect() as connection:
             version = connection.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError(f'unsupported broker schema version {version}')
             connection.execute("""CREATE TABLE IF NOT EXISTS plans (
               id TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -131,174 +128,31 @@ class PlanStore:
         with self._connect() as connection:
             connection.execute("UPDATE plans SET state = ?, result_json = ? WHERE id = ? AND state = 'applying'",
                                (state, json.dumps(result, ensure_ascii=False, sort_keys=True), identifier))
-            if state == "applied":
-                row = connection.execute("SELECT manifest_json FROM plans WHERE id = ?", (identifier,)).fetchone()
-                if row is not None:
-                    self._record_a_trier_actions(connection, json.loads(row["manifest_json"]), result)
+            # F-013/F-014 are deferred. Legacy learning tables are retained intact.
 
+    # F-013/F-014 are deferred. Keep legacy tables and rows, but expose no
+    # collection, inference, consultation, correction or deletion operation.
     @staticmethod
-    def _is_a_trier(path: str) -> bool:
-        first = Path(path).parts[0] if Path(path).parts else ""
-        normalised = unicodedata.normalize("NFD", first).casefold()
-        normalised = "".join(char for char in normalised if unicodedata.category(char) != "Mn")
-        return normalised == "a_trier"
+    def _learning_deferred() -> None:
+        raise RuntimeError('PB-LEARNING-DEFERRED')
 
-    def _record_a_trier_actions(self, connection: sqlite3.Connection, manifest: dict[str, Any], result: dict[str, Any]) -> None:
-        expected_by_destination = {item["destination"]: item["expected"] for item in manifest["actions"]
-                                   if self._is_a_trier(item["destination"])}
-        now = self._now().isoformat()
-        for action in result.get("actions", []):
-            destination = action.get("destination")
-            identity = action.get("destination_identity")
-            expected = expected_by_destination.get(destination)
-            if action.get("status") != "applied" or not expected or not isinstance(identity, dict):
-                continue
-            if not all(isinstance(identity.get(key), int) and identity[key] >= 0 for key in ("device", "inode", "mtime_ns")):
-                continue
-            connection.execute(
-                """INSERT OR REPLACE INTO a_trier_tracking
-                   (source_path, source_extension, source_size, source_mtime_ns, source_sha256, a_trier_path, device, inode, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (action["source"], Path(action["source"]).suffix.lower(), expected["size"], identity["mtime_ns"],
-                 expected["sha256"], destination, identity["device"], identity["inode"], now),
-            )
+    def reconcile_a_trier(self, *args: Any, **kwargs: Any) -> None:
+        self._learning_deferred()
 
-    def reconcile_a_trier(self, documents: dict[str, Any], documents_root: Path, sha256_max_bytes: int) -> dict[str, Any]:
-        """Learn user moves out of a_trier, then forget files that left scope.
+    def learning_hints(self, *args: Any, **kwargs: Any) -> None:
+        self._learning_deferred()
 
-        All matching happens on the host.  A hash is read only to decide between
-        indistinguishable local metadata candidates; it is never sent to the planner.
-        """
-        files = documents["files"]
-        by_path = {item["path"]: item for item in files}
-        with self._connect() as connection:
-            now = self._now()
-            connection.execute("DELETE FROM learning_examples WHERE expires_at <= ?", (now.isoformat(),))
-            connection.execute("DELETE FROM learning_events WHERE expires_at <= ?", (now.isoformat(),))
-            tracked = connection.execute("SELECT * FROM a_trier_tracking ORDER BY id").fetchall()
-            learned, missing = 0, []
-            for row in tracked:
-                tracked_path = row["a_trier_path"]
-                current = by_path.get(tracked_path)
-                if current is not None:
-                    continue
-                candidates = [item for item in files if item["size"] == row["source_size"]]
-                candidates = self._sha256_matches(candidates, documents_root, row["source_sha256"], sha256_max_bytes)
-                if len(candidates) == 1:
-                    found = candidates[0]
-                    if self._is_a_trier(found["path"]):
-                        connection.execute("UPDATE a_trier_tracking SET a_trier_path = ?, device = ?, inode = ? WHERE id = ?",
-                                           (found["path"], found["device"], found["inode"], row["id"]))
-                        continue
-                    destination = str(Path(found["path"]).parent)
-                    connection.execute(
-                        """INSERT INTO learning_examples
-                           (source_name, extension, size, destination_directory, learned_at, expires_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (Path(row["source_path"]).name, row["source_extension"], row["source_size"], destination,
-                         now.isoformat(), (now + timedelta(days=LEARNING_RETENTION_DAYS)).isoformat()),
-                    )
-                    connection.execute("INSERT INTO learning_events (event_type, source_path, destination, created_at, expires_at) "
-                                       "VALUES (?, ?, ?, ?, ?)",
-                                       ("learned", row["source_path"], destination, now.isoformat(),
-                                        (now + timedelta(days=LEARNING_RETENTION_DAYS)).isoformat()))
-                    learned += 1
-                else:
-                    missing.append(tracked_path)
-                    connection.execute("INSERT INTO learning_events (event_type, source_path, destination, created_at, expires_at) "
-                                       "VALUES (?, ?, NULL, ?, ?)",
-                                       ("forgotten", row["source_path"], now.isoformat(),
-                                        (now + timedelta(days=LEARNING_RETENTION_DAYS)).isoformat()))
-                if len(candidates) == 1:
-                    connection.execute("DELETE FROM a_trier_tracking WHERE id = ?", (row["id"],))
-        return {"learned": learned, "missing": missing}
+    def learning_status(self, *args: Any, **kwargs: Any) -> None:
+        self._learning_deferred()
 
-    @staticmethod
-    def _sha256_matches(candidates: list[dict[str, Any]], documents_root: Path, expected: str,
-                        sha256_max_bytes: int) -> list[dict[str, Any]]:
-        from .file_delivery import hash_document
-        matches = []
-        for candidate in candidates:
-            if candidate["size"] > sha256_max_bytes:
-                continue
-            try:
-                if hash_document(documents_root, documents_root / candidate["path"], sha256_max_bytes) == expected:
-                    matches.append(candidate)
-            except (OSError, ValueError):
-                continue
-        return matches
+    def list_learning_examples(self, *args: Any, **kwargs: Any) -> None:
+        self._learning_deferred()
 
-    def learning_hints(self, downloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Produce privacy-preserving routing hints from local manual corrections."""
-        with self._connect() as connection:
-            examples = connection.execute("SELECT source_name, extension, destination_directory FROM learning_examples "
-                                          "WHERE expires_at > ?", (self._now().isoformat(),)).fetchall()
-        hints = []
-        for download in downloads:
-            stem = self._tokens(Path(download["path"]).stem)
-            scores: dict[str, int] = {}
-            counts: dict[str, int] = {}
-            for example in examples:
-                if example["extension"] != download["extension"]:
-                    continue
-                example_stem = self._tokens(Path(example["source_name"]).stem)
-                overlap = stem & example_stem
-                exact = stem == example_stem and bool(stem)
-                if not exact and len(overlap) < 2:
-                    continue
-                weight = 100 if exact else len(overlap)
-                directory = example["destination_directory"]
-                scores[directory] = scores.get(directory, 0) + weight
-                counts[directory] = counts.get(directory, 0) + 1
-            if scores:
-                destination = max(scores, key=scores.get)
-                hints.append({"source": download["path"], "suggested_directory": destination,
-                              "evidence_count": counts[destination]})
-        return hints
+    def delete_learning_example(self, *args: Any, **kwargs: Any) -> None:
+        self._learning_deferred()
 
-    def learning_status(self, limit: int = 20) -> dict[str, Any]:
-        """Return local learning activity for the owner's explicit Telegram request."""
-        if limit < 1 or limit > 50:
-            raise ValueError("learning event limit must be between 1 and 50")
-        with self._connect() as connection:
-            now = self._now().isoformat()
-            connection.execute("DELETE FROM learning_examples WHERE expires_at <= ?", (now,))
-            connection.execute("DELETE FROM learning_events WHERE expires_at <= ?", (now,))
-            pending = connection.execute("SELECT count(*) FROM a_trier_tracking").fetchone()[0]
-            examples = connection.execute("SELECT count(*) FROM learning_examples").fetchone()[0]
-            example_rows = connection.execute("SELECT id, source_name, destination_directory, learned_at FROM learning_examples ORDER BY id").fetchall()
-            pending_rows = connection.execute("SELECT source_path, a_trier_path FROM a_trier_tracking ORDER BY id").fetchall()
-            events = connection.execute("SELECT event_type, source_path, destination, created_at FROM learning_events "
-                                        "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return {"pending": pending, "examples": examples, "example_rows": [dict(row) for row in example_rows],
-                "pending_rows": [dict(row) for row in pending_rows],
-                "events": [{"type": row["event_type"], "source": row["source_path"],
-                            "destination": row["destination"], "created_at": row["created_at"]} for row in events]}
-
-    def list_learning_examples(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute("SELECT id, source_name, destination_directory, learned_at FROM learning_examples ORDER BY id").fetchall()
-        return [dict(row) for row in rows]
-
-    def delete_learning_example(self, example_id: int) -> bool:
-        with self._connect() as connection:
-            return connection.execute("DELETE FROM learning_examples WHERE id = ?", (example_id,)).rowcount == 1
-
-    def correct_learning_example(self, example_id: int, directory: str, documents_root: Path) -> bool:
-        from .contracts import safe_relative
-        relative = safe_relative(directory, 'directory')
-        target = documents_root / relative
-        if not target.is_dir() or target.is_symlink():
-            raise ValueError('directory is absent or unsafe')
-        with self._connect() as connection:
-            return connection.execute("UPDATE learning_examples SET destination_directory = ? WHERE id = ?",
-                                      (str(relative), example_id)).rowcount == 1
-
-    @staticmethod
-    def _tokens(value: str) -> set[str]:
-        folded = unicodedata.normalize("NFD", value).casefold()
-        folded = "".join(char for char in folded if unicodedata.category(char) != "Mn")
-        return {part for part in re.findall(r"[a-z0-9]+", folded) if len(part) > 1}
+    def correct_learning_example(self, *args: Any, **kwargs: Any) -> None:
+        self._learning_deferred()
 
     def purge_plan_records(self, retention_days: int = 30) -> int:
         """Remove only broker metadata; this never examines or removes quarantine files."""

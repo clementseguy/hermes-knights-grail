@@ -3,7 +3,7 @@ WORKDIR /app
 COPY pyproject.toml /app/
 COPY src /app/src
 COPY prompts /app/prompts
-COPY scripts/learning-admin.py scripts/state-backup.py /app/scripts/
+COPY scripts/state-backup.py scripts/migrate-state.py scripts/manual-weekly.py /app/scripts/
 RUN pip install --no-cache-dir . && useradd --uid 10000 --create-home pb && mkdir /state && chown 10000:10000 /state && chmod 0700 /state
 USER 10000:10000
 ENV PYTHONUNBUFFERED=1

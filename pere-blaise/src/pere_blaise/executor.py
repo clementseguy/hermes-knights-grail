@@ -250,15 +250,15 @@ class Executor:
                 journal['actions'] = results
                 self._write(journal_path, journal)
                 return journal
-            except FileExistsError:
+            except FileExistsError as exc:
                 if journal['state'] == 'APPLYING' and current_destination is not None:
                     journal['ignore_existing'].append(current_destination)
                     self._write(journal_path, journal)
-                return self._rollback(journal_path, journal)
-            except Exception:
-                return self._rollback(journal_path, journal)
+                return self._rollback(journal_path, journal, exc)
+            except Exception as exc:
+                return self._rollback(journal_path, journal, exc)
 
-    def _rollback(self, path: Path, journal: dict[str, Any]) -> dict[str, Any]:
+    def _rollback(self, path: Path, journal: dict[str, Any], cause: Exception | None = None) -> dict[str, Any]:
         blocked = False
         for action in reversed(parse_manifest(journal['manifest'])):
             try:
@@ -297,6 +297,10 @@ class Executor:
             except (OSError, TransactionError, ValueError):
                 blocked = True
         journal['state'] = 'BLOCKED_RECOVERY' if blocked else 'ROLLED_BACK'
+        journal['code'] = 'PB-ROLLBACK-BLOCKED' if blocked else 'PB-APPLY-FAILED'
+        from .errors import incident
+        journal['incident'] = incident(journal['code'], stage='recovery' if cause is None else 'apply',
+                                       exc=cause, identifier=journal.get('incident'))
         self._write(path, journal)
         return journal
 

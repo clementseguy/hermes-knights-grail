@@ -8,20 +8,21 @@ behind the same local Unix-socket broker as Telegram.
 from __future__ import annotations
 
 import argparse
-from collections import deque
 import json
 from pathlib import Path
 import re
 import sys
 import time
 from typing import Any
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .router import parse_message
+from .ingress_ledger import IngressLedger
 from .telegram_gateway import Gateway, _env_value, _user_error
 
 
-HELP = "Commandes : analyse · apprentissages · détaille <id> · range <id> · envoie <nom>."
+HELP = "Commandes : analyse · détaille <id> · range <id> · envoie <nom>."
 
 
 def _csv(value: str) -> set[str]:
@@ -37,10 +38,18 @@ class Slack:
 
     def call(self, method: str, payload: dict[str, Any], *, app_token: bool = False) -> dict[str, Any]:
         token = self.app_token if app_token else self.bot_token
+        if method in ('files.getUploadURLExternal', 'files.completeUploadExternal'):
+            fields = {key: json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value)
+                      for key, value in payload.items()}
+            body = urlencode(fields).encode('utf-8')
+            content_type = 'application/x-www-form-urlencoded'
+        else:
+            body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            content_type = 'application/json; charset=utf-8'
         request = Request(
             "https://slack.com/api/" + method,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json; charset=utf-8"},
+            data=body,
+            headers={"Authorization": "Bearer " + token, "Content-Type": content_type},
             method="POST",
         )
         with urlopen(request, timeout=30) as response:  # nosec: fixed Slack API origin
@@ -51,7 +60,10 @@ class Slack:
 
     def socket_url(self) -> str:
         value = self.call("apps.connections.open", {}, app_token=True).get("url")
-        if not isinstance(value, str) or not value.startswith("wss://"):
+        parsed = urlparse(value) if isinstance(value, str) else None
+        if (not parsed or parsed.scheme != 'wss' or not parsed.hostname or
+                not parsed.hostname.endswith('.slack.com') or parsed.username or parsed.password or
+                parsed.port not in (None, 443)):
             raise ValueError("Slack API returned invalid socket URL")
         return value
 
@@ -84,19 +96,7 @@ class SlackGateway:
         self.gateway = Gateway(config, None, project, planner_env)
         self.slack, self.channel, self.users = slack, channel, users
         self.slack.send_max_bytes = int(config['send_max_bytes'])
-        self._event_ids: set[str] = set()
-        self._event_order: deque[str] = deque(maxlen=2048)
-
-    def _seen(self, event_id: object) -> bool:
-        if not isinstance(event_id, str) or not event_id:
-            return False
-        if event_id in self._event_ids:
-            return True
-        if len(self._event_order) == self._event_order.maxlen:
-            self._event_ids.discard(self._event_order.popleft())
-        self._event_order.append(event_id)
-        self._event_ids.add(event_id)
-        return False
+        self.ledger = IngressLedger(Path(config['runtime_dir']), int(config.get('retention_days', 30)))
 
     @staticmethod
     def _command_text(text: object) -> str | None:
@@ -114,7 +114,7 @@ class SlackGateway:
         if envelope.get("type") != "events_api":
             return
         payload = envelope.get("payload")
-        if not isinstance(payload, dict) or self._seen(payload.get("event_id")):
+        if not isinstance(payload, dict):
             return
         event = payload.get("event")
         if not isinstance(event, dict) or event.get("type") != "app_mention":
@@ -127,10 +127,14 @@ class SlackGateway:
         reply_thread = thread_ts if isinstance(thread_ts, str) else timestamp
         if text is None:
             return
+        event_id = payload.get('event_id')
+        if not isinstance(event_id, str) or not event_id or not self.ledger.begin('slack', event_id):
+            return
         command = parse_message(text)
         owner = self.gateway.owner('slack', sender)
         if command is None and not text.isdecimal():
             self.slack.reply(channel, reply_thread, HELP)
+            self.ledger.complete('slack', event_id)
             return
         try:
             if command and command.name in ('analyse', 'range', 'send'):
@@ -139,9 +143,9 @@ class SlackGateway:
             context = 'slack:' + channel + ':' + reply_thread
             response = self.gateway.select(owner, text, deliver, context) if text.isdecimal() else self.gateway.dispatch(command, owner, deliver, context)
         except Exception as exc:
-            print(f"slack command rejected: error_type={type(exc).__name__}", file=sys.stderr, flush=True)
-            response = _user_error(exc)
+            response = _user_error(exc, stage=command.name if command else 'command')
         self.slack.reply(channel, reply_thread, response)
+        self.ledger.complete('slack', event_id)
 
 
 def run(gateway: SlackGateway, socket_factory: Any) -> int:
@@ -166,7 +170,8 @@ def run(gateway: SlackGateway, socket_factory: Any) -> int:
         except KeyboardInterrupt:
             return 0
         except Exception as exc:
-            print(f"slack socket reconnect: error_type={type(exc).__name__}", file=sys.stderr, flush=True)
+            from .errors import incident
+            incident('PB-CHANNEL-FAILED', stage='slack-socket', exc=exc)
             time.sleep(delay)
             delay = min(delay * 2, 30)
         finally:

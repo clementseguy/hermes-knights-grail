@@ -52,6 +52,7 @@ api_key = None
 for line in (private / 'planner-api.env').read_text().splitlines():
     if line.startswith('API_SERVER_KEY='):
         api_key = line.split('=', 1)[1]
-if not planner_key or planner_key != api_key or len(api_key) < 32:
+if (not planner_key or planner_key != api_key or len(api_key) < 32 or
+        len(set(api_key)) < 8 or any(word in api_key.lower() for word in ('placeholder', 'example', 'fixture'))):
     raise SystemExit('internal API key absent, weak or mismatched')
 print('Private configuration shape and permissions: OK')

@@ -12,15 +12,14 @@ def _key(value: str) -> str:
     return unicodedata.normalize('NFD', value).casefold()
 
 
-def planner_context(inventory: dict[str, Any], *, learning_hints: list[dict[str, Any]] | None = None,
-                    max_directories: int = 500) -> dict[str, Any]:
+def planner_context(inventory: dict[str, Any], *, max_directories: int = 500) -> dict[str, Any]:
     downloads = inventory['downloads']['files']
     directories = inventory['documents']['directories']
     if len(directories) > max_directories:
         raise ValueError('directory inventory limit exceeded')
     return {'untrusted_downloads': [{'source_relative': unicodedata.normalize('NFC', item['path']), 'size': item['size'], 'extension': item['extension']}
                                     for item in downloads], 'document_directories': [unicodedata.normalize('NFC', path) for path in directories],
-            'learning_hints': learning_hints or []}
+            }
 
 
 def manifest_from_proposal(proposal: Any, inventory: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:

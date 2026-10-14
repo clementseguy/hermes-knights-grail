@@ -75,11 +75,6 @@ class Broker:
             raise ValueError('plan has expired')
         return plan
 
-    def learning_status(self, owner: str) -> dict[str, Any]:
-        if not owner:
-            raise PermissionError('owner is required')
-        return self.store.learning_status()
-
     def apply(self, owner: str, plan_id: str) -> dict[str, Any]:
         with self.operation_lock():
             return self._apply_locked(owner, plan_id)
@@ -102,13 +97,12 @@ class Broker:
         try:
             result = self.executor.apply(plan_id, claimed['manifest'])
         except Exception as exc:
-            import uuid
-            message = str(exc)
-            code = 'PB-BACKUP-SPACE' if 'space' in message else 'PB-PLAN-COLLISION' if 'destination exists' in message else 'PB-FS-DENIED' if isinstance(exc, PermissionError) else 'PB-PLAN-INVALID'
+            from .errors import classify, incident
+            code = classify(exc, stage='apply')
             journal = self.runtime_dir / f'{plan_id}.journal.json'
             uncertain = journal.exists()
+            code = 'PB-ROLLBACK-BLOCKED' if uncertain else code
             result = {'state': 'BLOCKED_RECOVERY' if uncertain else 'REJECTED',
-                      'code': 'PB-ROLLBACK-BLOCKED' if uncertain else code,
-                      'incident': uuid.uuid4().hex[:12], 'actions': []}
+                      'code': code, 'incident': incident(code, stage='apply', exc=exc), 'actions': []}
         self.store.finish(plan_id, result)
         return result

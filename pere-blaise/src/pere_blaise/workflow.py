@@ -38,11 +38,9 @@ def _analyse_locked(owner: str, home: Path, broker: Broker, planner: Planner, sh
     documents = broker.documents or home / 'Documents'
     inventory = {'downloads': scan(downloads, hash_files=True, sha256_max_bytes=sha256_max_bytes, max_files=broker.max_files),
                  'documents': scan(documents, hash_files=False, sha256_max_bytes=sha256_max_bytes, max_files=broker.max_files)}
-    broker.store.reconcile_a_trier(inventory['documents'], documents, sha256_max_bytes)
     if not inventory['downloads']['files']:
         raise ValueError('PB-DL-EMPTY')
-    context = planner_context(inventory, learning_hints=broker.store.learning_hints(inventory['downloads']['files']),
-                              max_directories=broker.max_directories)
+    context = planner_context(inventory, max_directories=broker.max_directories)
     last_error = None
     for _ in range(2):
         try:

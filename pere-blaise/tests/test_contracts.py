@@ -19,10 +19,13 @@ from pere_blaise.file_delivery import identity, search_documents, validate_selec
 from pere_blaise.planning import manifest_from_proposal, planner_context
 from pere_blaise.scanner import scan
 from pere_blaise.scheduler import WeeklyScheduler, run_once
-from pere_blaise.telegram_gateway import Gateway
+from pere_blaise.telegram_gateway import Gateway, process_updates
 from pere_blaise.slack_gateway import Slack, SlackGateway
 from pere_blaise.store import PlanStore
 from pere_blaise.workflow import analyse
+from pere_blaise.router import parse_message
+from pere_blaise.errors import CATALOG, classify, user_message
+from pere_blaise.ingress_ledger import IngressLedger
 
 
 class ContractTests(unittest.TestCase):
@@ -51,6 +54,7 @@ class ContractTests(unittest.TestCase):
         self.assertTrue((self.d / 'facture.txt').exists())
         self.assertNotIn('ancien-secret', seen[0]); self.assertNotIn('sha256', seen[0])
         self.assertNotIn('inode', seen[0]); self.assertNotIn('secret', seen[0])
+        self.assertNotIn('learning', seen[0])
 
     def test_apply_backups_and_owner(self):
         self.source()
@@ -252,6 +256,24 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(slack.calls[1][1]['thread_ts'], '123.4')
         self.assertEqual(upload.call_args.args[0].data, b'bytes')
 
+    def test_slack_upload_methods_use_form_fields(self):
+        import io
+        from unittest.mock import patch
+        from urllib.parse import parse_qs
+        slack = Slack('bot-test-token', 'app-test-token')
+        with patch('pere_blaise.slack_gateway.urlopen', return_value=io.BytesIO(b'{"ok":true}')) as api:
+            slack.call('files.getUploadURLExternal', {'filename': 'test.txt', 'length': 60})
+            request = api.call_args.args[0]
+            self.assertEqual(request.get_header('Content-type'), 'application/x-www-form-urlencoded')
+            self.assertEqual(parse_qs(request.data.decode()), {'filename': ['test.txt'], 'length': ['60']})
+        with patch('pere_blaise.slack_gateway.urlopen', return_value=io.BytesIO(b'{"ok":true}')) as api:
+            slack.call('files.completeUploadExternal', {'files': [{'id': 'F1', 'title': 'test.txt'}],
+                                                        'channel_id': 'C1', 'thread_ts': '123.4'})
+            fields = parse_qs(api.call_args.args[0].data.decode())
+            self.assertEqual(json.loads(fields['files'][0]), [{'id': 'F1', 'title': 'test.txt'}])
+            self.assertEqual(fields['channel_id'], ['C1'])
+            self.assertEqual(fields['thread_ts'], ['123.4'])
+
     def test_slack_channel_allowlist_and_thread_delivery(self):
         config = {'database': str(self.s / 'plans.sqlite3'), 'runtime_dir': str(self.s), 'downloads': str(self.d),
                   'documents': str(self.o), 'backups': str(self.b), 'sha256_max_bytes': 1000,
@@ -272,17 +294,42 @@ class ContractTests(unittest.TestCase):
         gateway.handle_envelope(envelope(event_id='e3'))
         self.assertEqual(slack.documents[0][:2], ('C1','123.4'))
         self.assertEqual(slack.documents[0][2], file)
+        restarted = SlackGateway(config, slack, Path(__file__).resolve().parents[1], self.root/'unused.env', 'C1', {'U1'})
+        restarted.handle_envelope(envelope(event_id='e3'))
+        self.assertEqual(len(slack.documents), 1)
 
-    def test_a_trier_hash_after_rename_and_duplicate(self):
+    def test_ingress_ledger_prevents_replay_after_restart(self):
+        first = IngressLedger(self.s)
+        self.assertTrue(first.begin('telegram', '123'))
+        self.assertFalse(IngressLedger(self.s).begin('telegram', '123'))
+        first.complete('telegram', '123')
+        self.assertFalse(IngressLedger(self.s).begin('telegram', '123'))
+        self.assertTrue(IngressLedger(self.s).begin('slack', '123'))
+
+    def test_telegram_update_is_not_replayed_after_restart(self):
+        class GatewayStub:
+            def __init__(self): self.handled = []
+            def handle(self, message): self.handled.append(message['text'])
+        event = [{'update_id': 101, 'message': {'text': 'envoie facture'}}]
+        first = GatewayStub()
+        self.assertEqual(process_updates(event, first, IngressLedger(self.s), 0), 102)
+        self.assertEqual(first.handled, ['envoie facture'])
+        restarted = GatewayStub()
+        self.assertEqual(process_updates(event, restarted, IngressLedger(self.s), 0), 102)
+        self.assertEqual(restarted.handled, [])
+
+    def test_a_trier_does_not_collect_learning(self):
         p = self.source('opaque.txt', b'unique')
         manifest = {'version': 2, 'actions': [{'source': p.name, 'destination': 'a_trier/' + p.name,
                                                'expected': fingerprint(p).as_dict()}]}
         plan = self.broker.create_plan('telegram:1', manifest, {'actions': [], 'snapshot': None})
         result = self.broker.apply('telegram:1', plan['id'])
         self.assertEqual(result['state'], 'APPLIED')
-        (self.o / 'a_trier' / p.name).rename(self.o / 'Factures' / 'renamed.txt')
-        docs = scan(self.o, hash_files=False, sha256_max_bytes=1000)
-        self.assertEqual(self.store.reconcile_a_trier(docs, self.o, 1000)['learned'], 1)
+        with sqlite3.connect(self.store.database) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM a_trier_tracking').fetchone()[0], 0)
+        self.assertIsNone(parse_message('apprentissages'))
+        with self.assertRaisesRegex(RuntimeError, 'PB-LEARNING-DEFERRED'):
+            self.store.reconcile_a_trier({}, self.o, 1000)
 
     def test_scheduler_and_channel_failure(self):
         schedule = WeeklyScheduler(self.s / 'schedule.sqlite3', enabled=True)
@@ -299,6 +346,18 @@ class ContractTests(unittest.TestCase):
             def _analyse(self, _owner): return 'plan ready'
         slack = Slack(); failures = run_once(Gateway(), Fail(), slack, '1', 'C1', 'telegram:1')
         self.assertEqual(len(slack.messages), 2); self.assertIn('telegram_start', failures)
+
+    def test_scheduler_catchup_window_dst_and_restart(self):
+        path = self.s / 'schedule.sqlite3'
+        schedule = WeeklyScheduler(path, enabled=True)
+        self.assertFalse(schedule.claim(datetime(2026, 10, 18, 14, 59, tzinfo=timezone.utc)))
+        self.assertTrue(schedule.claim(datetime(2026, 10, 19, 7, 0, tzinfo=timezone.utc)))  # Monday 09 Paris
+        self.assertFalse(WeeklyScheduler(path, enabled=True).claim(datetime(2026, 10, 19, 8, 0, tzinfo=timezone.utc)))
+        self.assertFalse(schedule.claim(datetime(2026, 10, 19, 15, 0, tzinfo=timezone.utc)))  # Monday 17 Paris
+        self.assertFalse(schedule.due(datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc)))
+        self.assertTrue(schedule.claim(datetime(2026, 10, 26, 8, 0, tzinfo=timezone.utc)))  # DST ended
+        self.assertTrue(schedule.claim(datetime(2027, 3, 29, 7, 0, tzinfo=timezone.utc)))  # DST started
+        self.assertFalse(WeeklyScheduler(path, enabled=False).claim(datetime(2027, 4, 4, 15, 0, tzinfo=timezone.utc)))
 
     def test_weekly_notifies_both_before_analysis_without_range(self):
         events=[]
@@ -401,29 +460,49 @@ class ContractTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.broker.apply('telegram:1', plan['id'])
         self.assertFalse(any(self.b.iterdir()))
 
-    def test_learning_duplicate_hash_remains_pending(self):
-        p = self.source('opaque.txt', b'contents')
-        manifest = {'version': 2, 'actions': [{'source': p.name, 'destination': 'a_trier/' + p.name,
-                                               'expected': fingerprint(p).as_dict()}]}
-        plan = self.broker.create_plan('telegram:1', manifest, {'actions': [], 'snapshot': None})
-        self.broker.apply('telegram:1', plan['id'])
-        (self.o / 'a_trier' / p.name).rename(self.o / 'Factures' / 'renamed.txt')
-        (self.o / 'Factures' / 'copy.txt').write_bytes(b'contents')
-        docs = scan(self.o, hash_files=False, sha256_max_bytes=1000)
-        outcome = self.store.reconcile_a_trier(docs, self.o, 1000)
-        self.assertEqual(outcome['learned'], 0)
-        self.assertEqual(self.store.learning_status()['pending'], 1)
-
-    def test_operator_learning_correction_and_erasure(self):
+    def test_existing_learning_rows_remain_intact_but_unavailable(self):
         now = datetime.now(timezone.utc)
         with sqlite3.connect(self.store.database) as db:
             cursor = db.execute('INSERT INTO learning_examples (source_name,extension,size,destination_directory,learned_at,expires_at) VALUES (?,?,?,?,?,?)',
                                 ('facture.txt','.txt',4,'a_trier',now.isoformat(),(now+timedelta(days=90)).isoformat()))
             example_id = cursor.lastrowid
-        self.assertTrue(self.store.correct_learning_example(example_id, 'Factures', self.o))
-        self.assertEqual(self.store.list_learning_examples()[0]['destination_directory'], 'Factures')
-        self.assertTrue(self.store.delete_learning_example(example_id))
-        self.assertEqual(self.store.list_learning_examples(), [])
+        self.source('facture.txt')
+        seen=[]
+        analyse('telegram:1', self.root, self.broker, lambda context: (seen.append(context) or self.planner(context)), 1000)
+        self.assertNotIn('learning_hints', seen[0])
+        for call in (lambda: self.store.learning_hints([]), lambda: self.store.learning_status(),
+                     lambda: self.store.list_learning_examples(), lambda: self.store.delete_learning_example(example_id),
+                     lambda: self.store.correct_learning_example(example_id, 'Factures', self.o)):
+            with self.assertRaisesRegex(RuntimeError, 'PB-LEARNING-DEFERRED'): call()
+        with sqlite3.connect(self.store.database) as db:
+            self.assertEqual(db.execute('SELECT destination_directory FROM learning_examples WHERE id=?', (example_id,)).fetchone()[0], 'a_trier')
+
+    def test_error_catalog_and_sanitized_incident(self):
+        import io
+        from contextlib import redirect_stderr
+        for code in ('PB-DL-EMPTY','PB-FS-DENIED','PB-PLAN-EXPIRED','PB-PLAN-INVALID','PB-PLAN-OWNER',
+                     'PB-PLAN-COLLISION','PB-BACKUP-SPACE','PB-BACKUP-VERIFY','PB-APPLY-FAILED',
+                     'PB-ROLLBACK-BLOCKED','PB-MODEL-UNAVAILABLE','PB-SEND-NOTFOUND','PB-SEND-AMBIGUOUS',
+                     'PB-SEND-LIMIT','PB-SEND-FAILED','PB-SEND-UNCERTAIN','PB-CHANNEL-FAILED'):
+            self.assertIn(code, CATALOG)
+            secret = 'secret-token-and-document-name'
+            output = io.StringIO()
+            with redirect_stderr(output):
+                response = user_message(code, stage='test', exc=ValueError(secret))
+            incident_id = response.rsplit('incident ', 1)[1]
+            self.assertIn(incident_id, output.getvalue())
+            self.assertNotIn(secret, output.getvalue() + response)
+        self.assertEqual(classify(ValueError('backup verification failed'), stage='apply'), 'PB-BACKUP-VERIFY')
+
+    def test_slack_socket_origin_is_restricted(self):
+        slack = Slack('fixture-bot', 'fixture-app')
+        for url in ('wss://wss-primary.slack.com/link', 'wss://wss-backup.slack.com/link'):
+            slack.call = lambda *_args, **_kwargs: {'url': url}
+            self.assertEqual(slack.socket_url(), url)
+        for url in ('wss://slack.com.evil.test/link', 'wss://user@wss-primary.slack.com/link',
+                    'ws://wss-primary.slack.com/link', 'wss://wss-primary.slack.com:8443/link'):
+            slack.call = lambda *_args, **_kwargs: {'url': url}
+            with self.assertRaises(ValueError): slack.socket_url()
 
     def test_sqlite_backup_restore(self):
         script = Path(__file__).resolve().parents[1] / 'scripts' / 'state-backup.py'
@@ -439,6 +518,40 @@ class ContractTests(unittest.TestCase):
                                  '--destination', str(restored)], capture_output=True, text=True)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertIsNotNone(PlanStore(restored).get(plan['id']))
+
+    def test_versioned_schema_migration_and_rollback_preserve_legacy_data(self):
+        script = Path(__file__).resolve().parents[1] / 'scripts' / 'migrate-state.py'
+        with sqlite3.connect(self.store.database) as db:
+            db.execute('INSERT INTO learning_events (event_type,source_path,destination,created_at,expires_at) VALUES (?,?,?,?,?)',
+                       ('legacy','private-name',None,'2026-10-14','2027-01-14'))
+        first = self.root / 'before-upgrade.sqlite3'
+        command = [sys.executable, str(script), 'upgrade', '--database', str(self.store.database),
+                   '--state', str(self.s), '--backup', str(first)]
+        preview = subprocess.run(command + ['--dry-run'], capture_output=True, text=True)
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertFalse(first.exists())
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with sqlite3.connect(self.store.database) as db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(db.execute('SELECT source_path FROM learning_events').fetchone()[0], 'private-name')
+        second = self.root / 'before-rollback.sqlite3'
+        result = subprocess.run([sys.executable, str(script), 'rollback', '--database', str(self.store.database),
+                                 '--state', str(self.s), '--backup', str(second)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with sqlite3.connect(self.store.database) as db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT source_path FROM learning_events').fetchone()[0], 'private-name')
+        self.assertTrue(first.with_name(first.name+'.sha256').exists())
+
+    def test_schema_migration_refuses_active_journal(self):
+        script = Path(__file__).resolve().parents[1] / 'scripts' / 'migrate-state.py'
+        (self.s/'unfinished.journal.json').write_text(json.dumps({'state':'APPLYING'}))
+        backup = self.root/'no-backup.sqlite3'
+        result = subprocess.run([sys.executable, str(script), 'upgrade', '--database', str(self.store.database),
+                                 '--state', str(self.s), '--backup', str(backup)], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(backup.exists())
 
 
 if __name__ == '__main__': unittest.main()

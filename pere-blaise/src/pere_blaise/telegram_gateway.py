@@ -19,6 +19,7 @@ from .hermes_client import planner_request
 from .router import Command, parse_message
 from .workflow import analyse
 from .broker import Broker
+from .ingress_ledger import IngressLedger
 from .store import PlanStore
 
 
@@ -74,19 +75,9 @@ class Telegram:
             raise ValueError("Telegram refused the document")
 
 
-def _user_error(exc: Exception) -> str:
-    from urllib.error import URLError
-    message = str(exc)
-    code = message if message.startswith('PB-') and ' ' not in message else 'PB-PLAN-INVALID'
-    if isinstance(exc, PermissionError): code = 'PB-PLAN-OWNER' if 'owner' in message else 'PB-FS-DENIED'
-    elif isinstance(exc, URLError): code = 'PB-MODEL-UNAVAILABLE'
-    elif 'expired' in message: code = 'PB-PLAN-EXPIRED'
-    elif 'space' in message: code = 'PB-BACKUP-SPACE'
-    elif 'too large' in message: code = 'PB-SEND-LIMIT'
-    elif 'inventory changed' in message or 'no longer applicable' in message: code = 'PB-PLAN-INVALID'
-    incident = uuid.uuid4().hex[:12]
-    print(json.dumps({'incident': incident, 'code': code, 'error_type': type(exc).__name__}), file=sys.stderr, flush=True)
-    return f"{code} — Opération refusée ; vérifier le journal local — incident {incident}"
+def _user_error(exc: Exception, *, stage: str = 'command') -> str:
+    from .errors import classify, user_message
+    return user_message(classify(exc, stage=stage), stage=stage, exc=exc)
 
 
 class Gateway:
@@ -132,22 +123,6 @@ class Gateway:
         lines.append(f"Expire : {plan['expires_at']}. Accord final : range {plan_id}.")
         return '\n'.join(lines)
 
-    def _learning(self, owner: str) -> str:
-        from .scanner import scan
-        root = Path(self.config['documents'])
-        with self.broker.operation_lock():
-            inventory = scan(root, hash_files=False, sha256_max_bytes=int(self.config['sha256_max_bytes']),
-                             max_files=int(self.config.get('max_files', 1000)))
-            self.broker.store.reconcile_a_trier(inventory, root, int(self.config['sha256_max_bytes']))
-            status = self.broker.learning_status(owner)
-        lines = [f"Apprentissages : {status['examples']} ; en attente : {status['pending']}.",
-                 f"Backups : {self.config['backups']}"]
-        lines += [f"• #{e['id']} {e['source_name']} → {e['destination_directory']} ({e['learned_at']})" for e in status['example_rows']]
-        lines += [f"• En attente : {e['source_path']} ({e['a_trier_path']})" for e in status['pending_rows']]
-        lines += [f"• {e['type']} : {e['source']} → {e['destination'] or '?'}" for e in status['events']]
-        lines.append('Correction/effacement : demander à l’exploitant la procédure SQLite hors ligne.')
-        return '\n'.join(lines)
-
     def _apply(self, owner: str, plan_id: str) -> str:
         result = self.broker.apply(owner, plan_id)
         state = result['state']
@@ -161,10 +136,13 @@ class Gateway:
         documents = Path(self.config['documents'])
         matches = search_documents(documents, query)
         if not matches:
-            return 'PB-SEND-NOTFOUND — Aucun fichier correspondant.'
+            from .errors import user_message
+            return user_message('PB-SEND-NOTFOUND', stage='send')
         if len(matches) > 1:
             self.pending[(owner, context)] = [(p, identity(p)) for p in matches]
-            return 'PB-SEND-AMBIGUOUS — Choisir un numéro parmi tous les résultats :\n' + '\n'.join(
+            from .errors import incident
+            identifier = incident('PB-SEND-AMBIGUOUS', stage='send')
+            return f'PB-SEND-AMBIGUOUS — Choisir un numéro ; incident {identifier} :\n' + '\n'.join(
                 f'{i}. {p.relative_to(documents)}' for i, p in enumerate(matches, 1))
         expected = identity(matches[0])
         p = validate_selection(documents, matches[0], expected, int(self.config['send_max_bytes']))
@@ -194,7 +172,6 @@ class Gateway:
         if command.name == 'analyse': return self._analyse(owner)
         if command.name == 'detail': return self._detail(owner, command.argument)
         if command.name == 'range': return self._apply(owner, command.argument)
-        if command.name == 'learning': return self._learning(owner)
         if command.name == 'send': return self._send(owner, command.argument, deliver, context)
         raise ValueError('PB-PLAN-INVALID')
 
@@ -213,10 +190,28 @@ class Gateway:
                 command = parse_message(value)
                 if command and command.name in ('analyse', 'range', 'send'):
                     self.telegram.message(chat_id, 'Opération en cours ; résultat à suivre dans ce chat.')
-                response = self.dispatch(command, owner, lambda path, content: self.telegram.document(chat_id, path, content), 'telegram:' + chat_id) if command else 'Commandes : analyse, détaille <ID>, range <ID>, envoie <nom>, apprentissages.'
+                response = self.dispatch(command, owner, lambda path, content: self.telegram.document(chat_id, path, content), 'telegram:' + chat_id) if command else 'Commandes : analyse, détaille <ID>, range <ID>, envoie <nom>.'
         except Exception as exc:
-            response = _user_error(exc)
+            response = _user_error(exc, stage=command.name if 'command' in locals() and command else 'command')
         self.telegram.message(chat_id, response)
+
+
+def process_updates(updates: Any, gateway: Gateway, ledger: IngressLedger, offset: int) -> int:
+    """Mark before dispatch; a crashed delivery is never replayed automatically."""
+    for update in updates if isinstance(updates, list) else []:
+        event_id = update.get('update_id') if isinstance(update, dict) else None
+        if not isinstance(event_id, int):
+            continue
+        if ledger.begin('telegram', str(event_id)):
+            try:
+                if isinstance(update.get('message'), dict):
+                    gateway.handle(update['message'])
+                ledger.complete('telegram', str(event_id))
+            except Exception as exc:
+                from .errors import incident
+                incident('PB-CHANNEL-FAILED', stage='telegram-ingress', exc=exc)
+        offset = max(offset, event_id + 1)
+    return offset
 
 
 def main() -> int:
@@ -228,15 +223,14 @@ def main() -> int:
     config = json.loads(args.broker_config.read_text())
     telegram = Telegram(_env_value(args.telegram_env, 'TELEGRAM_BOT_TOKEN'))
     gateway = Gateway(config, telegram, Path(__file__).resolve().parents[2], args.planner_env)
-    offset = 0
+    state = Path(config['runtime_dir'])
+    ledger = IngressLedger(state, int(config.get('retention_days', 30)))
+    legacy_offset = state / 'telegram-offset'
+    offset = int(legacy_offset.read_text()) if legacy_offset.exists() else 0
     while True:
         try:
             updates = telegram.call('getUpdates', {'offset': offset, 'timeout': 30, 'allowed_updates': json.dumps(['message'])})
-            for update in updates if isinstance(updates, list) else []:
-                if isinstance(update.get('update_id'), int):
-                    offset = max(offset, update['update_id'] + 1)
-                if isinstance(update.get('message'), dict):
-                    gateway.handle(update['message'])
+            offset = process_updates(updates, gateway, ledger, offset)
         except KeyboardInterrupt:
             return 0
         except Exception:
