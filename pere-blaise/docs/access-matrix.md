@@ -1,12 +1,12 @@
-# Matrice d’accès
+# Matrice d'accès et refus
 
-| Ressource | Droits | Justification | Refus prouvé |
+| Ressource | Hermes | Broker | Motif et refus attendu |
 | --- | --- | --- | --- |
-| Downloads | métadonnées, lecture lors de copie vérifiée | inventaire et classement | hors racine/symlinks refusés |
-| Documents | métadonnées ; écriture uniquement `range` | cible validée | contenu non lu, hors plan refusé |
-| Quarantaine | écriture d’originaux appliqués | retour arrière | aucune purge automatique |
-| SQLite | lecture/écriture locale privée | plans/apprentissages | propriétaire de plan imposé |
-| Telegram/Slack | réseau sortant, allowlists | commandes déterministes | utilisateur/canal refusé |
-| API locale 8643 | hôte → loopback | proposition seulement | aucune écoute publique |
-| Docker | planificateur isolé | modèle sans fichiers | pas de socket/montage personnel |
-| LaunchAgents | lancement local | continuité | aucun endpoint réseau |
+| `Downloads` | Aucun montage | Métadonnées, hash, backup, retrait de source après copie vérifiée | Hors racine, lien symbolique et fichier changé refusés |
+| `Documents` | Aucun montage | Dossiers/noms locaux ; lecture d'octets pour hash de rapprochement et envoi ; nouvelles cibles de plan | Existant jamais remplacé/supprimé ; seul `a_trier` créé |
+| Backups | Aucun montage | Écriture/vérification, restauration ; aucune purge automatique | Chemin hors racine refusé |
+| SQLite | Volume Hermes natif privé | Volume broker natif privé | Aucun volume partagé entre agents ; sauvegarde SQLite API |
+| Secrets | OAuth dans volume Hermes | Tokens Telegram/Slack et clé interne en fichiers privés montés ro | Valeurs absentes des logs/Git ; aucune clé API OpenAI |
+| Réseau | API modèle et API interne | API interne et plateformes | Aucun port public ; allowlist egress par domaine non encore prouvée |
+| Canaux | Aucun token de canal | Allowlist Telegram privé et Slack canal privé | Autre utilisateur/canal et DM Slack refusés |
+| Outils | Aucun toolset sur la surface API | Interface déterministe sans commande libre | `/v1/toolsets` : zéro activé sur image test |

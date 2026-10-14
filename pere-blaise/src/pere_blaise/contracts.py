@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePath
@@ -39,8 +40,6 @@ def canonical_plan_id(value: Any) -> str:
     """Validate an old token or normalize a two-word French plan identifier."""
     if not isinstance(value, str):
         raise ValueError("invalid plan id")
-    if PLAN_ID.fullmatch(value.upper()):
-        return value.upper()
     normalized = unicodedata.normalize("NFC", value).casefold()
     parts = normalized.split("-")
     if len(parts) == 2 and parts[0] in PLAN_ADJECTIVES and parts[1] in PLAN_NOUNS:
@@ -54,7 +53,7 @@ def safe_relative(value: Any, field: str) -> Path:
     if any(unicodedata.category(char).startswith("C") for char in value):
         raise ValueError(f"{field} contains control or invisible formatting characters")
     candidate = PurePath(value)
-    if candidate.is_absolute() or "." in candidate.parts or ".." in candidate.parts:
+    if candidate.is_absolute() or "\\" in value or "." in candidate.parts or ".." in candidate.parts:
         raise ValueError(f"{field} must remain below its allowed root")
     if any(part.startswith(".") for part in candidate.parts):
         raise ValueError(f"{field} must not reference hidden files or directories")
@@ -107,10 +106,13 @@ def parse_manifest(raw: Any) -> list[Action]:
             raise ValueError(f"actions[{index}] has unexpected fields")
         source = safe_relative(item["source"], f"actions[{index}].source")
         destination = safe_relative(item["destination"], f"actions[{index}].destination")
-        if source in sources or destination in destinations:
+        if source.name != destination.name:
+            raise ValueError("destination must preserve basename")
+        folded = unicodedata.normalize("NFD", str(destination)).casefold()
+        if source in sources or folded in destinations:
             raise ValueError("a source or destination is duplicated")
         sources.add(source)
-        destinations.add(destination)
+        destinations.add(folded)
         parsed.append(Action(source, destination, ExpectedFile.parse(item["expected"], f"actions[{index}].expected")))
     return parsed
 
@@ -134,7 +136,18 @@ def manifest_digest(raw: Any) -> str:
 def fingerprint(path: Path) -> ExpectedFile:
     info = path.lstat()
     digest = hashlib.sha256()
-    with path.open("rb", buffering=0) as handle:
-        while chunk := handle.read(1024 * 1024):
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError('not a regular file')
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns):
+            raise ValueError('file changed while scanning')
+        while chunk := os.read(fd, 1024 * 1024):
             digest.update(chunk)
+        after = os.fstat(fd)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns):
+            raise ValueError('file changed during hash')
+    finally:
+        os.close(fd)
     return ExpectedFile(info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, digest.hexdigest())

@@ -1,117 +1,62 @@
-"""Host-side analysis workflow; the planner is deliberately an injected pure boundary."""
+"""Non-destructive analysis workflow."""
 from __future__ import annotations
 
-import stat
-import unicodedata
+import hashlib
+import json
+import re
 from pathlib import Path
 from typing import Any, Callable
 
 from .broker import Broker
-from .planning import manifest_from_proposal, organisation_review_from_proposal, planner_context
-from .scanner import scan_library
+from .planning import manifest_from_proposal, planner_context
+from .scanner import scan
 
 Planner = Callable[[dict[str, Any]], dict[str, Any]]
 
 
-def _normalised_component(value: str) -> str:
-    """Compare a user-facing directory name without trusting its spelling variant."""
-    decomposed = unicodedata.normalize("NFD", value).casefold()
-    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
+def _opaque_name(name: str) -> bool:
+    stem = Path(name).stem
+    compact = re.sub(r'[^a-zA-Z0-9]', '', stem)
+    if len(compact) >= 12 and sum(char.isdigit() for char in compact) * 2 >= len(compact):
+        return True
+    return len(compact) >= 18 and not re.search(r'[aeiouyAEIOUY]{2}', compact)
 
 
-def _destination_reason(destination: Path, documents_root: Path) -> str | None:
-    """Return a safe, deterministic rejection reason before a plan is persisted.
-
-    The executor repeats these checks at application time.  This preflight exists so the
-    user never receives a plan that is already known to collide or traverse a symlink.
-    """
-    candidate = documents_root / destination
-    if candidate.exists() or candidate.is_symlink():
-        return "destination_already_exists"
-    current = documents_root
-    try:
-        root_info = current.lstat()
-    except OSError:
-        return "documents_root_unavailable"
-    if not stat.S_ISDIR(root_info.st_mode) or current.is_symlink():
-        return "documents_root_is_not_a_real_directory"
-    for part in destination.parts[:-1]:
-        current = current / part
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
-            # All remaining ancestors will be created by the fixed executor.
-            return None
-        except OSError:
-            return "destination_parent_unavailable"
-        if current.is_symlink():
-            return "destination_parent_is_symlink"
-        if not stat.S_ISDIR(info.st_mode):
-            return "destination_parent_is_not_a_directory"
-    return None
-
-
-def _preflight(manifest: dict[str, Any], documents_root: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    allowed, excluded = [], []
-    for action in manifest["actions"]:
-        destination = Path(action["destination"])
-        reason = _destination_reason(destination, documents_root)
-        if reason:
-            excluded.append({"source": action["source"], "destination": action["destination"], "reason": reason})
-        else:
-            allowed.append(action)
-    if not allowed:
-        raise ValueError("no proposed action passed destination preflight")
-    return {"version": 2, "actions": allowed}, excluded
-
-
-def _details(manifest: dict[str, Any], excluded: list[dict[str, str]]) -> dict[str, Any]:
-    actions = [{"source": item["source"], "destination": item["destination"]} for item in manifest["actions"]]
-    confidence = "low" if any(
-        _normalised_component(Path(item["destination"]).parts[0]) == "a_trier" for item in actions
-    ) else "medium"
-    ambiguities = [
-        {"source": item["source"], "destination": item["destination"], "reason": "sent_to_a_trier"}
-        for item in actions
-        if _normalised_component(Path(item["destination"]).parts[0]) == "a_trier"
-    ]
-    return {"confidence": confidence, "actions": actions, "ambiguities": ambiguities, "excluded": excluded,
-            "organization_review": [], "learning": {"learned": 0, "missing": []}}
+def inventory_signature(inventory: dict[str, Any]) -> str:
+    payload = {'downloads': [(f['path'], f['expected']) for f in inventory['downloads']['files']],
+               'directories': inventory['documents']['directories']}
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
 def analyse(owner: str, home: Path, broker: Broker, planner: Planner, sha256_max_bytes: int) -> dict[str, Any]:
-    """Create a proposed plan only.  This function has no apply path."""
-    inventory = scan_library(home, sha256_max_bytes)
-    reconciliation = broker.store.reconcile_a_trier(inventory["documents"], home / "Documents", sha256_max_bytes)
-    if not inventory["downloads"]["files"]:
-        raise ValueError("no eligible downloads visible to this process")
-    context = planner_context(inventory, learning_hints=broker.store.learning_hints(inventory["downloads"]["files"]))
-    last_error: ValueError | None = None
-    manifest = None
-    proposal: dict[str, Any] | None = None
-    # One retry absorbs an occasional conversational/non-conforming model reply.
-    # Both attempts remain pure planning calls: no plan exists and no file changes
-    # until a strict manifest has passed validation.
-    for attempt in range(2):
+    with broker.operation_lock():
+        return _analyse_locked(owner, home, broker, planner, sha256_max_bytes)
+
+
+def _analyse_locked(owner: str, home: Path, broker: Broker, planner: Planner, sha256_max_bytes: int) -> dict[str, Any]:
+    downloads = broker.downloads or home / 'Downloads'
+    documents = broker.documents or home / 'Documents'
+    inventory = {'downloads': scan(downloads, hash_files=True, sha256_max_bytes=sha256_max_bytes, max_files=broker.max_files),
+                 'documents': scan(documents, hash_files=False, sha256_max_bytes=sha256_max_bytes, max_files=broker.max_files)}
+    broker.store.reconcile_a_trier(inventory['documents'], documents, sha256_max_bytes)
+    if not inventory['downloads']['files']:
+        raise ValueError('PB-DL-EMPTY')
+    context = planner_context(inventory, learning_hints=broker.store.learning_hints(inventory['downloads']['files']),
+                              max_directories=broker.max_directories)
+    last_error = None
+    for _ in range(2):
         try:
-            attempt_context = context if attempt == 0 else {
-                **context,
-                "planner_retry_requirement": "The previous response had no usable actions. Return at least one action when untrusted_downloads is non-empty; use a_trier for uncertain files.",
-            }
-            proposal = planner(attempt_context)
-            manifest = manifest_from_proposal(proposal, inventory)
+            manifest, action_details = manifest_from_proposal(planner(context), inventory)
             break
         except ValueError as exc:
             last_error = exc
-    if manifest is None:
-        assert last_error is not None
-        raise last_error
-    manifest, excluded = _preflight(manifest, home / "Documents")
-    excluded.extend(
-        {"source": item["path"], "reason": item["reason"]}
-        for item in inventory["downloads"]["excluded"]
-    )
-    details = _details(manifest, excluded)
-    details["organization_review"] = organisation_review_from_proposal(proposal)
-    details["learning"] = reconciliation
+    else:
+        raise last_error or ValueError('invalid proposal')
+    count = len(action_details)
+    a_trier = sum(Path(item['destination']).parent == Path('a_trier') for item in action_details)
+    opaque = any(item['certainty'] == 'opaque' or _opaque_name(item['source']) for item in action_details)
+    confidence = 'Low' if opaque or a_trier * 5 >= count else 'Medium' if a_trier else 'High'
+    details = {'actions': action_details, 'confidence': confidence, 'a_trier_count': a_trier,
+               'a_trier_percent': 100 * a_trier / count, 'excluded_count': inventory['downloads']['excluded_count'],
+               'snapshot': inventory_signature(inventory)}
     return broker.create_plan(owner, manifest, details)

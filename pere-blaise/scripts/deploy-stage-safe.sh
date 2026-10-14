@@ -6,7 +6,7 @@ set -euo pipefail
 readonly SLUG="pere-blaise"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SOURCE_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
-readonly EXPECTED_SOURCE="$(cd -- "$HOME/workspace/my-hermes/$SLUG" && pwd -P)"
+readonly EXPECTED_SOURCE="$(cd -- "$HOME/workspace/hermes-knights-grail/$SLUG" && pwd -P)"
 EXPECTED_DEPLOY_ROOT="$HOME/Library/Application Support/HermesAgents/deployments"
 
 die() { printf 'deploy-stage-safe: %s\n' "$*" >&2; exit 2; }
@@ -49,6 +49,7 @@ while (($#)); do
   esac
 done
 
+printf 'Physical source: %s\n' "$SOURCE_DIR"
 [[ "$SOURCE_DIR" == "$EXPECTED_SOURCE" ]] || die "source is not the canonical $EXPECTED_SOURCE"
 [[ -f "$SOURCE_DIR/pyproject.toml" && -f "$SOURCE_DIR/README.md" && -d "$SOURCE_DIR/src" ]] || die "source is incomplete"
 if find "$SOURCE_DIR" -type l -print -quit | grep -q .; then
@@ -67,6 +68,7 @@ esac
 
 readonly DESTINATION="$DEPLOY_ROOT/$SLUG"
 readonly STAGING_PARENT="$DEPLOY_ROOT/.staging"
+printf 'Physical destination: %s\n' "$DESTINATION"
 
 if [[ "$ACTION" == "activate" || "$ACTION" == "replace" ]]; then
   [[ -n "$ACTIVATE_STAGE" ]] || usage

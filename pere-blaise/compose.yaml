@@ -1,0 +1,69 @@
+name: hermes-pere-blaise
+services:
+  pere-blaise:
+    image: nousresearch/hermes-agent@sha256:9774f4f39a9bb8c2f68ce728ed5e99ddbad282163be56764afacf88ed952b784
+    container_name: hermes-pere-blaise
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 1536m
+    security_opt: ["no-new-privileges:true"]
+    env_file: ${PB_PLANNER_ENV_FILE:?private planner env required}
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_WRITE_SAFE_ROOT: /opt/data/outbox
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: "8642"
+    volumes:
+      - hermes-pere-blaise-data:/opt/data
+      - ${PB_HERMES_CONFIG:?private config required}:/opt/data/config.yaml:ro
+    networks: [private, outbound]
+    healthcheck:
+      test: ["CMD", "hermes", "gateway", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  broker:
+    build:
+      context: .
+      dockerfile: Dockerfile.broker
+    container_name: hermes-pere-blaise-broker
+    restart: unless-stopped
+    read_only: true
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 1024m
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      PB_CONFIG: /run/private/broker.json
+      PB_TELEGRAM_TOKEN_FILE: /run/private/telegram.token
+      PB_SLACK_BOT_TOKEN_FILE: /run/private/slack-bot.token
+      PB_SLACK_APP_TOKEN_FILE: /run/private/slack-app.token
+      PB_PLANNER_ENV: /run/private/planner.env
+    volumes:
+      - hermes-pere-blaise-broker-data:/state
+      - ${PB_DOWNLOADS:?downloads required}:/downloads
+      - ${PB_DOCUMENTS:?documents required}:/documents
+      - ${PB_BACKUPS:?backups required}:/backups
+      - ${PB_PRIVATE_DIR:?private directory required}:/run/private:ro
+    tmpfs: [/tmp]
+    networks: [private, outbound]
+    depends_on:
+      pere-blaise:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; assert time.time()-os.stat('/state/heartbeat').st_mtime < 90"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+networks:
+  private:
+    internal: true
+  outbound: {}
+volumes:
+  hermes-pere-blaise-data:
+    name: hermes-pere-blaise-data
+  hermes-pere-blaise-broker-data:
+    name: hermes-pere-blaise-broker-data

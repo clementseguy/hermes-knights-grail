@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import sqlite3
@@ -24,6 +25,9 @@ class PlanStore:
         database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.database, self.sha256_max_bytes = database, sha256_max_bytes
         with self._connect() as connection:
+            version = connection.execute('PRAGMA user_version').fetchone()[0]
+            if version not in (0, 1):
+                raise RuntimeError(f'unsupported broker schema version {version}')
             connection.execute("""CREATE TABLE IF NOT EXISTS plans (
               id TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at TEXT NOT NULL,
               expires_at TEXT NOT NULL, state TEXT NOT NULL, manifest_json TEXT NOT NULL,
@@ -43,6 +47,9 @@ class PlanStore:
               id INTEGER PRIMARY KEY, event_type TEXT NOT NULL, source_path TEXT NOT NULL,
               destination TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL
             )""")
+            if version == 0:
+                connection.execute('PRAGMA user_version = 1')
+        os.chmod(database, 0o600)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -51,6 +58,9 @@ class PlanStore:
         try:
             yield connection
             connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -58,9 +68,9 @@ class PlanStore:
     def _now() -> datetime:
         return datetime.now(timezone.utc)
 
-    def create(self, *, owner: str, manifest: Any, details: dict[str, Any], ttl_hours: int = 12) -> dict[str, Any]:
-        if not owner or ttl_hours < 1 or ttl_hours > 12:
-            raise ValueError("owner is required and ttl_hours must be between 1 and 12")
+    def create(self, *, owner: str, manifest: Any, details: dict[str, Any], ttl_minutes: int = 30) -> dict[str, Any]:
+        if not owner or ttl_minutes != 30:
+            raise ValueError("owner is required and plan validity must be 30 minutes")
         actions = parse_manifest(manifest)
         if any(action.expected.size > self.sha256_max_bytes for action in actions):
             raise ValueError("a file exceeds the approved SHA-256 size ceiling")
@@ -69,10 +79,11 @@ class PlanStore:
         for _ in range(10):
             identifier = f"{secrets.choice(PLAN_ADJECTIVES)}-{secrets.choice(PLAN_NOUNS)}"
             record = {"id": identifier, "owner": owner, "created_at": now.isoformat(),
-                      "expires_at": (now + timedelta(hours=ttl_hours)).isoformat(), "state": "proposed",
+                      "expires_at": (now + timedelta(minutes=ttl_minutes)).isoformat(), "state": "proposed",
                       "manifest": normal, "manifest_sha256": manifest_digest(normal), "details": details}
             try:
                 with self._connect() as connection:
+                    connection.execute("UPDATE plans SET state = 'invalidated' WHERE state = 'proposed'")
                     connection.execute("INSERT INTO plans VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
                                        (record["id"], owner, record["created_at"], record["expires_at"], record["state"],
                                         json.dumps(normal, ensure_ascii=False, sort_keys=True), record["manifest_sha256"],
@@ -116,12 +127,11 @@ class PlanStore:
             return record
 
     def finish(self, identifier: str, result: dict[str, Any]) -> None:
-        failures = bool(result.get("executor_error")) or any(item.get("status") != "applied" for item in result.get("actions", []))
-        state = "applied_with_errors" if failures else "applied"
+        state = {"APPLIED": "applied", "ROLLED_BACK": "rolled_back", "BLOCKED_RECOVERY": "blocked_recovery"}.get(result.get("state"), "rejected")
         with self._connect() as connection:
             connection.execute("UPDATE plans SET state = ?, result_json = ? WHERE id = ? AND state = 'applying'",
                                (state, json.dumps(result, ensure_ascii=False, sort_keys=True), identifier))
-            if state.startswith("applied"):
+            if state == "applied":
                 row = connection.execute("SELECT manifest_json FROM plans WHERE id = ?", (identifier,)).fetchone()
                 if row is not None:
                     self._record_a_trier_actions(connection, json.loads(row["manifest_json"]), result)
@@ -172,14 +182,8 @@ class PlanStore:
                 current = by_path.get(tracked_path)
                 if current is not None:
                     continue
-                identity_matches = [item for item in files if item["device"] == row["device"] and item["inode"] == row["inode"]]
-                metadata_matches = [item for item in files if item["path"].split("/")[-1] == Path(tracked_path).name
-                                    and item["size"] == row["source_size"] and item["mtime_ns"] == row["source_mtime_ns"]]
-                candidates = identity_matches or metadata_matches
-                if len(candidates) != 1:
-                    size_matches = [item for item in files if item["size"] == row["source_size"]]
-                    candidates = candidates or size_matches
-                    candidates = self._sha256_matches(candidates, documents_root, row["source_sha256"], sha256_max_bytes)
+                candidates = [item for item in files if item["size"] == row["source_size"]]
+                candidates = self._sha256_matches(candidates, documents_root, row["source_sha256"], sha256_max_bytes)
                 if len(candidates) == 1:
                     found = candidates[0]
                     if self._is_a_trier(found["path"]):
@@ -205,20 +209,22 @@ class PlanStore:
                                        "VALUES (?, ?, NULL, ?, ?)",
                                        ("forgotten", row["source_path"], now.isoformat(),
                                         (now + timedelta(days=LEARNING_RETENTION_DAYS)).isoformat()))
-                connection.execute("DELETE FROM a_trier_tracking WHERE id = ?", (row["id"],))
+                if len(candidates) == 1:
+                    connection.execute("DELETE FROM a_trier_tracking WHERE id = ?", (row["id"],))
         return {"learned": learned, "missing": missing}
 
     @staticmethod
     def _sha256_matches(candidates: list[dict[str, Any]], documents_root: Path, expected: str,
                         sha256_max_bytes: int) -> list[dict[str, Any]]:
+        from .file_delivery import hash_document
         matches = []
         for candidate in candidates:
             if candidate["size"] > sha256_max_bytes:
                 continue
             try:
-                if fingerprint(documents_root / candidate["path"]).sha256 == expected:
+                if hash_document(documents_root, documents_root / candidate["path"], sha256_max_bytes) == expected:
                     matches.append(candidate)
-            except OSError:
+            except (OSError, ValueError):
                 continue
         return matches
 
@@ -260,11 +266,33 @@ class PlanStore:
             connection.execute("DELETE FROM learning_events WHERE expires_at <= ?", (now,))
             pending = connection.execute("SELECT count(*) FROM a_trier_tracking").fetchone()[0]
             examples = connection.execute("SELECT count(*) FROM learning_examples").fetchone()[0]
+            example_rows = connection.execute("SELECT id, source_name, destination_directory, learned_at FROM learning_examples ORDER BY id").fetchall()
+            pending_rows = connection.execute("SELECT source_path, a_trier_path FROM a_trier_tracking ORDER BY id").fetchall()
             events = connection.execute("SELECT event_type, source_path, destination, created_at FROM learning_events "
                                         "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return {"pending": pending, "examples": examples,
+        return {"pending": pending, "examples": examples, "example_rows": [dict(row) for row in example_rows],
+                "pending_rows": [dict(row) for row in pending_rows],
                 "events": [{"type": row["event_type"], "source": row["source_path"],
                             "destination": row["destination"], "created_at": row["created_at"]} for row in events]}
+
+    def list_learning_examples(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT id, source_name, destination_directory, learned_at FROM learning_examples ORDER BY id").fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_learning_example(self, example_id: int) -> bool:
+        with self._connect() as connection:
+            return connection.execute("DELETE FROM learning_examples WHERE id = ?", (example_id,)).rowcount == 1
+
+    def correct_learning_example(self, example_id: int, directory: str, documents_root: Path) -> bool:
+        from .contracts import safe_relative
+        relative = safe_relative(directory, 'directory')
+        target = documents_root / relative
+        if not target.is_dir() or target.is_symlink():
+            raise ValueError('directory is absent or unsafe')
+        with self._connect() as connection:
+            return connection.execute("UPDATE learning_examples SET destination_directory = ? WHERE id = ?",
+                                      (str(relative), example_id)).rowcount == 1
 
     @staticmethod
     def _tokens(value: str) -> set[str]:
@@ -278,7 +306,8 @@ class PlanStore:
             raise ValueError("retention_days must be positive")
         cutoff = self._now() - timedelta(days=retention_days)
         with self._connect() as connection:
-            return connection.execute("DELETE FROM plans WHERE created_at < ?", (cutoff.isoformat(),)).rowcount
+            return connection.execute("DELETE FROM plans WHERE created_at < ? AND state IN ('applied','rolled_back','rejected','expired','invalidated')",
+                                      (cutoff.isoformat(),)).rowcount
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:

@@ -1,387 +1,444 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
+import sqlite3
 import sys
+import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-from pere_blaise.contracts import canonical_plan_id, fingerprint, parse_manifest
-from pere_blaise.scanner import scan
-from pere_blaise.service import LocalService
-from pere_blaise.router import Command, parse_message
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from pere_blaise.broker import Broker
+from pere_blaise.contracts import fingerprint
+from pere_blaise.executor import Executor, TransactionError
+from pere_blaise.file_delivery import identity, search_documents, validate_selection
 from pere_blaise.planning import manifest_from_proposal, planner_context
-from pere_blaise.workflow import analyse
+from pere_blaise.scanner import scan
+from pere_blaise.scheduler import WeeklyScheduler, run_once
+from pere_blaise.telegram_gateway import Gateway
+from pere_blaise.slack_gateway import Slack, SlackGateway
 from pere_blaise.store import PlanStore
-from pere_blaise.file_delivery import search_documents
-from pere_blaise.telegram_gateway import _error_code, _user_error
-from pere_blaise.slack_gateway import SlackGateway
-
-
-def manifest_for(path: Path, destination: str = "À_trier/example.txt") -> dict:
-    expected = fingerprint(path)
-    return {"version": 2, "actions": [{"source": "example.txt", "destination": destination,
-            "expected": expected.as_dict()}]}
+from pere_blaise.workflow import analyse
 
 
 class ContractTests(unittest.TestCase):
-    def test_manifest_rejects_parent_escape(self) -> None:
-        raw = {"version": 2, "actions": [{"source": "../x", "destination": "y", "expected": {"device": 1, "inode": 1, "size": 1, "mtime_ns": 1, "sha256": "a" * 64}}]}
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.d = self.root / 'Downloads'; self.o = self.root / 'Documents'; self.b = self.root / 'Backups'; self.s = self.root / 'state'
+        for p in (self.d, self.o, self.b, self.s): p.mkdir()
+        (self.o / 'Factures').mkdir()
+        self.store = PlanStore(self.s / 'plans.sqlite3')
+        self.broker = Broker(self.store, runtime_dir=self.s, downloads=self.d, documents=self.o, backups=self.b)
+
+    def source(self, name='facture.txt', data=b'data'):
+        p = self.d / name; p.write_bytes(data); return p
+
+    def planner(self, context):
+        return {'actions': [{'source_relative': x['source_relative'], 'destination_relative': 'Factures/' + x['source_relative'],
+                             'reason': 'Le nom indique une facture', 'certainty': 'clear'} for x in context['untrusted_downloads']]}
+
+    def test_analysis_minimizes_data_and_does_not_move(self):
+        self.source(); (self.o / 'Factures' / 'ancien-secret.txt').write_text('secret')
+        seen = []
+        plan = analyse('telegram:1', self.root, self.broker, lambda c: (seen.append(json.dumps(c)) or self.planner(c)), 1000)
+        self.assertEqual(plan['details']['confidence'], 'High')
+        self.assertTrue((self.d / 'facture.txt').exists())
+        self.assertNotIn('ancien-secret', seen[0]); self.assertNotIn('sha256', seen[0])
+        self.assertNotIn('inode', seen[0]); self.assertNotIn('secret', seen[0])
+
+    def test_apply_backups_and_owner(self):
+        self.source()
+        plan = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        with self.assertRaises(PermissionError): self.broker.apply('slack:1', plan['id'])
+        result = self.broker.apply('telegram:1', plan['id'])
+        self.assertEqual(result['state'], 'APPLIED')
+        self.assertFalse((self.d / 'facture.txt').exists())
+        self.assertEqual((self.o / 'Factures' / 'facture.txt').read_bytes(), b'data')
+        self.assertEqual((self.b / plan['id'] / 'facture.txt').read_bytes(), b'data')
+        with self.assertRaises(ValueError): self.broker.apply('telegram:1', plan['id'])
+
+    def test_rollback_after_first_move(self):
+        a = self.source('a.txt', b'a'); z = self.source('z.txt', b'z')
+        manifest = {'version': 2, 'actions': [
+            {'source': p.name, 'destination': 'Factures/' + p.name, 'expected': fingerprint(p).as_dict()} for p in (a, z)]}
+        result = self.broker.executor.apply('calme-arbre', manifest, fault_after=1)
+        self.assertEqual(result['state'], 'ROLLED_BACK')
+        self.assertTrue(a.exists() and z.exists())
+        self.assertFalse((self.o / 'Factures' / 'a.txt').exists())
+        self.assertTrue((self.b / 'calme-arbre' / 'a.txt').exists())
+
+    def test_recovery_after_interrupted_move(self):
+        p = self.source(); manifest = {'version': 2, 'actions': [{'source': p.name, 'destination': 'Factures/' + p.name,
+                                                                   'expected': fingerprint(p).as_dict()}]}
+        ident = 'calme-arbre'; backup = self.b / ident; backup.mkdir(); (backup / p.name).write_bytes(p.read_bytes())
+        dest = self.o / 'Factures' / p.name; dest.write_bytes(p.read_bytes()); p.unlink()
+        journal = {'plan_id': ident, 'state': 'APPLYING', 'manifest': manifest, 'moved': [], 'incident': 'test',
+                   'created': {'Factures/facture.txt': {'device': dest.stat().st_dev, 'inode': dest.stat().st_ino}}}
+        (self.s / (ident + '.journal.json')).write_text(json.dumps(journal))
+        results = self.broker.executor.recover()
+        self.assertEqual(results[0]['state'], 'ROLLED_BACK')
+        self.assertTrue(p.exists()); self.assertFalse(dest.exists())
+
+    def test_recovery_before_first_movement_keeps_sources(self):
+        p = self.source(); manifest = {'version': 2, 'actions': [{'source': p.name,
+            'destination': 'Factures/' + p.name, 'expected': fingerprint(p).as_dict()}]}
+        for ident, state in [('calme-arbre','PREPARING'), ('calme-avion','BACKUPS_VERIFIED')]:
+            backup = self.b/ident; backup.mkdir(); (backup/p.name).write_bytes(p.read_bytes())
+            (self.s/(ident+'.journal.json')).write_text(json.dumps({'plan_id':ident,'state':state,
+                'manifest':manifest,'moved':[],'created':{},'incident':'test'}))
+        results = self.broker.executor.recover()
+        self.assertEqual([item['state'] for item in results], ['ROLLED_BACK','ROLLED_BACK'])
+        self.assertTrue(p.exists())
+
+    def test_recovery_blocks_concurrent_edit(self):
+        p = self.source(); manifest = {'version': 2, 'actions': [{'source': p.name, 'destination': 'Factures/' + p.name,
+                                                                   'expected': fingerprint(p).as_dict()}]}
+        ident = 'calme-arbre'; backup = self.b / ident; backup.mkdir(); (backup / p.name).write_bytes(p.read_bytes())
+        dest = self.o / 'Factures' / p.name; dest.write_bytes(b'edited'); p.unlink()
+        (self.s / (ident + '.journal.json')).write_text(json.dumps({'plan_id': ident, 'state': 'APPLYING',
+            'manifest': manifest, 'moved': [], 'created': {'Factures/facture.txt':
+            {'device': dest.stat().st_dev, 'inode': dest.stat().st_ino}}}))
+        self.assertEqual(self.broker.executor.recover()[0]['state'], 'BLOCKED_RECOVERY')
+        self.assertEqual(dest.read_bytes(), b'edited')
+
+    def test_unknown_matching_target_is_never_removed(self):
+        p = self.source(); manifest = {'version': 2, 'actions': [{'source': p.name,
+            'destination': 'Factures/' + p.name, 'expected': fingerprint(p).as_dict()}]}
+        dest = self.o/'Factures'/p.name; dest.write_bytes(p.read_bytes())
+        journal = {'plan_id': 'calme-arbre', 'state': 'APPLYING', 'manifest': manifest,
+                   'moved': [], 'created': {}, 'incident': 'test'}
+        (self.s/'calme-arbre.journal.json').write_text(json.dumps(journal))
+        outcome = self.broker.executor.recover()[0]
+        self.assertEqual(outcome['state'], 'BLOCKED_RECOVERY')
+        self.assertEqual(dest.read_bytes(), b'data')
+        with self.assertRaises(RuntimeError): self.broker.create_plan('telegram:1', manifest, {'actions': []})
+
+    def test_hard_process_crash_and_restart(self):
+        p = self.source()
+        manifest = {'version': 2, 'actions': [{'source': p.name, 'destination': 'Factures/' + p.name,
+                                               'expected': fingerprint(p).as_dict()}]}
+        code = ('from pathlib import Path; from pere_blaise.executor import Executor; '
+                f'Executor(Path({str(self.d)!r}),Path({str(self.o)!r}),Path({str(self.b)!r}),Path({str(self.s)!r}))'
+                f'.apply("calme-arbre",{manifest!r},crash_after=1)')
+        env = __import__('os').environ.copy()
+        env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1] / 'src')
+        result = subprocess.run([sys.executable, '-c', code], env=env, capture_output=True)
+        self.assertEqual(result.returncode, 77)
+        recovered = Executor(self.d, self.o, self.b, self.s).recover()
+        self.assertEqual(recovered[0]['state'], 'ROLLED_BACK')
+        self.assertTrue(p.exists()); self.assertFalse((self.o / 'Factures' / p.name).exists())
+
+    def test_restart_finishes_committed_journal_without_reapplying(self):
+        p = self.source(); manifest = {'version': 2, 'actions': [{'source': p.name,
+            'destination': 'Factures/' + p.name, 'expected': fingerprint(p).as_dict()}]}
+        plan = self.broker.create_plan('telegram:1', manifest, {'actions': []})
+        self.store.claim(plan['id'], 'telegram:1')
+        self.assertEqual(self.broker.executor.apply(plan['id'], manifest)['state'], 'APPLIED')
+        restarted = Broker(PlanStore(self.store.database), runtime_dir=self.s,
+                           downloads=self.d, documents=self.o, backups=self.b)
+        self.assertEqual(restarted.store.get(plan['id'])['state'], 'applied')
+        self.assertFalse(p.exists())
+
+    def test_plan_expiry_and_invalidation(self):
+        self.source(); first = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        self.assertEqual((datetime.fromisoformat(first['expires_at']) - datetime.fromisoformat(first['created_at'])).total_seconds(), 1800)
+        second = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        with self.assertRaises(ValueError): self.broker.detail('telegram:1', first['id'])
+        with sqlite3.connect(self.store.database) as db:
+            db.execute('UPDATE plans SET expires_at=? WHERE id=?', ((datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat(), second['id']))
+        with self.assertRaises(ValueError): self.broker.apply('telegram:1', second['id'])
+
+    def test_changed_download_and_directory_invalidate(self):
+        self.source(); plan = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        (self.o / 'Nouveau').mkdir()
+        with self.assertRaises(ValueError): self.broker.apply('telegram:1', plan['id'])
+        self.assertTrue((self.d / 'facture.txt').exists())
+
+    def test_proposal_requires_complete_and_existing_directory(self):
+        self.source(); inv = {'downloads': scan(self.d, hash_files=True, sha256_max_bytes=1000),
+                              'documents': scan(self.o, hash_files=False, sha256_max_bytes=1000)}
+        with self.assertRaises(ValueError): manifest_from_proposal({'actions': []}, inv)
+        with self.assertRaises(ValueError): manifest_from_proposal({'actions': [{'source_relative': 'facture.txt',
+            'destination_relative': 'MadeUp/facture.txt', 'reason': 'x', 'certainty': 'clear'}]}, inv)
+
+    def test_send_zero_one_many_and_symlink(self):
+        self.assertEqual(search_documents(self.o, 'facture'), [])
+        a = self.o / 'Factures' / 'facturé.txt'; a.write_text('a')
+        self.assertEqual(search_documents(self.o, 'facture'), [a])
+        other = self.o / 'autre'; other.mkdir(); b = other / 'facture.pdf'; b.write_text('b')
+        self.assertEqual(len(search_documents(self.o, 'facture')), 2)
+        target = self.root / 'outside'; target.write_text('x'); (self.o / 'Factures' / 'facture-link').symlink_to(target)
+        self.assertEqual(len(search_documents(self.o, 'facture')), 2)
+        with self.assertRaises(ValueError): validate_selection(self.o, a, identity(a), 0)
+
+    def test_fifo_cannot_block_file_fingerprinting(self):
+        fifo = self.d / 'untrusted.fifo'
+        os.mkfifo(fifo)
         with self.assertRaises(ValueError):
-            parse_manifest(raw)
+            fingerprint(fifo)
 
-    def test_manifest_rejects_hidden_paths(self) -> None:
-        raw = {"version": 2, "actions": [{"source": ".DS_Store", "destination": "x",
-               "expected": {"device": 1, "inode": 1, "size": 1, "mtime_ns": 1, "sha256": "a" * 64}}]}
+    def test_send_choice_owner_and_revalidation(self):
+        config = {'database': str(self.s / 'plans.sqlite3'), 'runtime_dir': str(self.s), 'downloads': str(self.d),
+                  'documents': str(self.o), 'backups': str(self.b), 'sha256_max_bytes': 1000,
+                  'send_max_bytes': 1000, 'telegram_allowed_user_ids': ['1']}
+        gateway = Gateway(config, None, Path(__file__).resolve().parents[1], self.root / 'unused.env')
+        (self.o / 'Factures' / 'invoice.txt').write_bytes(b'a')
+        (self.o / 'invoice.txt').write_bytes(b'b')
+        sent = []
+        response = gateway._send('telegram:1', 'invoice', sent.append)
+        self.assertIn('1.', response); self.assertIn('2.', response); self.assertEqual(sent, [])
+        with self.assertRaises(ValueError): gateway.select('slack:1', '1', sent.append)
+        (self.o / 'Factures' / 'invoice.txt').write_bytes(b'changed')
+        with self.assertRaises(ValueError): gateway.select('telegram:1', '1', sent.append)
+        self.assertEqual(sent, [])
+
+    def test_send_selection_is_bound_to_original_channel_and_thread(self):
+        config = {'database': str(self.s / 'plans.sqlite3'), 'runtime_dir': str(self.s), 'downloads': str(self.d),
+                  'documents': str(self.o), 'backups': str(self.b), 'sha256_max_bytes': 1000,
+                  'send_max_bytes': 1000, 'identity_map': {'telegram:1': 'person:one', 'slack:U1': 'person:one'}}
+        gateway = Gateway(config, None, Path(__file__).resolve().parents[1], self.root / 'unused.env')
+        (self.o / 'Factures' / 'invoice.txt').write_bytes(b'a')
+        (self.o / 'invoice.txt').write_bytes(b'b')
+        sent = []
+        gateway._send('person:one', 'invoice', lambda path, content: sent.append(content), 'telegram:1')
         with self.assertRaises(ValueError):
-            parse_manifest(raw)
+            gateway.select('person:one', '1', lambda path, content: sent.append(content), 'slack:C1:123')
+        gateway._send('person:one', 'invoice', lambda path, content: sent.append(content), 'slack:C1:123')
+        with self.assertRaises(ValueError):
+            gateway.select('person:one', '1', lambda path, content: sent.append(content), 'slack:C1:456')
+        self.assertEqual(sent, [])
 
-    def test_store_claim_is_owner_bound_and_single_use(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "example.txt"
-            source.write_text("safe")
-            store = PlanStore(Path(directory) / "plans.sqlite3")
-            plan = store.create(owner="123", manifest=manifest_for(source), details={"confidence": "low"})
-            self.assertEqual(len(plan["id"].split("-")), 2)
-            with self.assertRaises(PermissionError):
-                store.claim(plan["id"], "456")
-            store.claim(plan["id"], "123")
-            with self.assertRaises(ValueError):
-                store.claim(plan["id"], "123")
+    def test_send_one_passes_only_selected_bytes(self):
+        config = {'database': str(self.s / 'plans.sqlite3'), 'runtime_dir': str(self.s), 'downloads': str(self.d),
+                  'documents': str(self.o), 'backups': str(self.b), 'sha256_max_bytes': 1000,
+                  'send_max_bytes': 1000, 'telegram_allowed_user_ids': ['1']}
+        gateway = Gateway(config, None, Path(__file__).resolve().parents[1], self.root/'unused.env')
+        file = self.o/'Factures'/'invoice.txt'; file.write_bytes(b'only this file')
+        sent=[]
+        result = gateway._send('telegram:1', 'invoice', lambda path, content: sent.append((path,content)))
+        self.assertIn('Fichier envoyé', result)
+        self.assertEqual(sent, [(file,b'only this file')])
 
-    def test_store_refuses_plan_over_sha256_ceiling(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "example.txt"
-            source.write_text("safe")
-            manifest = manifest_for(source)
-            manifest["actions"][0]["expected"]["size"] = 11
-            store = PlanStore(Path(directory) / "plans.sqlite3", sha256_max_bytes=10)
-            with self.assertRaises(ValueError):
-                store.create(owner="123", manifest=manifest, details={})
+    def test_private_identity_mapping_requires_configuration(self):
+        config = {'database': str(self.s/'plans.sqlite3'), 'runtime_dir': str(self.s), 'downloads': str(self.d),
+                  'documents': str(self.o), 'backups': str(self.b), 'sha256_max_bytes': 1000,
+                  'send_max_bytes': 1000, 'identity_map': {'telegram:1':'person:clement', 'slack:U1':'person:clement'}}
+        gateway = Gateway(config, None, Path(__file__).resolve().parents[1], self.root/'unused.env')
+        self.assertEqual(gateway.owner('telegram','1'), gateway.owner('slack','U1'))
+        self.assertNotEqual(gateway.owner('telegram','2'), gateway.owner('slack','U2'))
 
-    def test_executor_refuses_changed_source(self) -> None:
-        spec = importlib.util.spec_from_file_location("executor", ROOT / "scripts" / "apply-organize-plan-v2.py")
-        assert spec and spec.loader
-        executor = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(executor)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            downloads, documents, quarantine = root / "Downloads", root / "Documents", root / "Quarantine"
-            downloads.mkdir(); documents.mkdir()
-            source = downloads / "example.txt"; source.write_text("original")
-            action = parse_manifest(manifest_for(source))[0]
-            source.write_text("changed")
-            result = executor._apply_one(action, downloads, documents, quarantine)
-            self.assertTrue(result["status"].startswith("failed:"))
-            self.assertTrue(source.exists())
-            self.assertFalse((documents / "À_trier/example.txt").exists())
+    def test_slack_native_upload_uses_only_original_thread(self):
+        from unittest.mock import patch
+        class FakeSlack(Slack):
+            def __init__(self): super().__init__('fake-bot', 'fake-app'); self.calls=[]
+            def call(self, method, payload, **kwargs):
+                self.calls.append((method,payload))
+                return {'upload_url':'https://files.slack.com/upload/fake','file_id':'F1'} if method=='files.getUploadURLExternal' else {'ok':True}
+        class Response:
+            status=200
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+        slack=FakeSlack()
+        with patch('pere_blaise.slack_gateway.urlopen', return_value=Response()) as upload:
+            slack.document('C1','123.4',Path('invoice.txt'),b'bytes')
+        self.assertEqual(slack.calls[0][0], 'files.getUploadURLExternal')
+        self.assertEqual(slack.calls[1][1]['channel_id'], 'C1')
+        self.assertEqual(slack.calls[1][1]['thread_ts'], '123.4')
+        self.assertEqual(upload.call_args.args[0].data, b'bytes')
 
-    def test_executor_copies_then_quarantines_verified_source(self) -> None:
-        spec = importlib.util.spec_from_file_location("executor", ROOT / "scripts" / "apply-organize-plan-v2.py")
-        assert spec and spec.loader
-        executor = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(executor)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            downloads, documents, quarantine = root / "Downloads", root / "Documents", root / "Quarantine"
-            downloads.mkdir(); documents.mkdir()
-            source = downloads / "example.txt"; source.write_text("original")
-            action = parse_manifest(manifest_for(source))[0]
-            result = executor._apply_one(action, downloads, documents, quarantine)
-            self.assertEqual(result["status"], "applied")
-            self.assertEqual((documents / "À_trier/example.txt").read_text(), "original")
-            self.assertFalse(source.exists())
-            self.assertTrue((quarantine / "example.txt").exists())
-            self.assertIn("destination_identity", result)
+    def test_slack_channel_allowlist_and_thread_delivery(self):
+        config = {'database': str(self.s / 'plans.sqlite3'), 'runtime_dir': str(self.s), 'downloads': str(self.d),
+                  'documents': str(self.o), 'backups': str(self.b), 'sha256_max_bytes': 1000,
+                  'send_max_bytes': 1000, 'telegram_allowed_user_ids': [], 'slack_allowed_user_ids': ['U1']}
+        class Slack:
+            def __init__(self): self.replies=[]; self.documents=[]
+            def reply(self, channel, thread, text): self.replies.append((channel, thread, text))
+            def document(self, channel, thread, path, root): self.documents.append((channel, thread, path, root))
+        slack=Slack()
+        gateway=SlackGateway(config, slack, Path(__file__).resolve().parents[1], self.root/'unused.env', 'C1', {'U1'})
+        file=self.o/'Factures'/'invoice.txt'; file.write_bytes(b'a')
+        def envelope(channel='C1', user='U1', event_id='e1', text='<@B1> envoie invoice'):
+            return {'type':'events_api','payload':{'event_id':event_id,'event':{'type':'app_mention','channel':channel,
+                    'user':user,'ts':'123.4','text':text}}}
+        gateway.handle_envelope(envelope(channel='C2'))
+        gateway.handle_envelope(envelope(user='U2',event_id='e2'))
+        self.assertEqual(slack.replies, []); self.assertEqual(slack.documents, [])
+        gateway.handle_envelope(envelope(event_id='e3'))
+        self.assertEqual(slack.documents[0][:2], ('C1','123.4'))
+        self.assertEqual(slack.documents[0][2], file)
 
-    def test_scanner_excludes_file_above_hash_ceiling(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); (root / "large.bin").write_bytes(b"01234567890")
-            result = scan(root, hash_files=True, sha256_max_bytes=10)
-            self.assertEqual(result["files"], [])
-            self.assertEqual(result["excluded"][0]["reason"], "sha256_size_ceiling")
+    def test_a_trier_hash_after_rename_and_duplicate(self):
+        p = self.source('opaque.txt', b'unique')
+        manifest = {'version': 2, 'actions': [{'source': p.name, 'destination': 'a_trier/' + p.name,
+                                               'expected': fingerprint(p).as_dict()}]}
+        plan = self.broker.create_plan('telegram:1', manifest, {'actions': [], 'snapshot': None})
+        result = self.broker.apply('telegram:1', plan['id'])
+        self.assertEqual(result['state'], 'APPLIED')
+        (self.o / 'a_trier' / p.name).rename(self.o / 'Factures' / 'renamed.txt')
+        docs = scan(self.o, hash_files=False, sha256_max_bytes=1000)
+        self.assertEqual(self.store.reconcile_a_trier(docs, self.o, 1000)['learned'], 1)
 
-    def test_scanner_ignores_hidden_files_and_directories(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "visible.pdf").write_text("visible")
-            (root / ".DS_Store").write_text("hidden")
-            (root / ".localized").write_text("hidden")
-            (root / ".private").mkdir()
-            (root / ".private" / "nested.pdf").write_text("hidden")
-            result = scan(root, hash_files=True, sha256_max_bytes=1024)
-            self.assertEqual([item["path"] for item in result["files"]], ["visible.pdf"])
+    def test_scheduler_and_channel_failure(self):
+        schedule = WeeklyScheduler(self.s / 'schedule.sqlite3', enabled=True)
+        sunday = datetime(2026, 10, 18, 15, 0, tzinfo=timezone.utc)
+        self.assertTrue(schedule.claim(sunday)); self.assertFalse(schedule.claim(sunday))
+        winter = datetime(2026, 12, 20, 16, 0, tzinfo=timezone.utc)
+        self.assertTrue(schedule.claim(winter))
+        class Fail:
+            def message(self, *_): raise RuntimeError('offline')
+        class Slack:
+            def __init__(self): self.messages=[]
+            def call(self, _method, payload): self.messages.append(payload['text'])
+        class Gateway:
+            def _analyse(self, _owner): return 'plan ready'
+        slack = Slack(); failures = run_once(Gateway(), Fail(), slack, '1', 'C1', 'telegram:1')
+        self.assertEqual(len(slack.messages), 2); self.assertIn('telegram_start', failures)
 
-    def test_scanner_excludes_invisible_filename_without_echoing_it(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            unsafe = "report\u200c.pdf"
-            (root / unsafe).write_text("metadata must not cross the boundary")
-            result = scan(root, hash_files=True, sha256_max_bytes=1024)
-            self.assertEqual(result["files"], [])
-            self.assertEqual(result["excluded"], [{"reason": "unsafe_filename"}])
-            with self.assertRaises(ValueError):
-                parse_manifest({"version": 2, "actions": [{"source": unsafe, "destination": "x.pdf",
-                                "expected": {"device": 1, "inode": 1, "size": 1, "mtime_ns": 1,
-                                             "sha256": "a" * 64}}]})
+    def test_weekly_notifies_both_before_analysis_without_range(self):
+        events=[]
+        class Telegram:
+            def message(self, _chat, text): events.append(('telegram',text))
+        class Slack:
+            def call(self, _method, payload): events.append(('slack',payload['text']))
+        class Gateway:
+            def _analyse(self, _owner): events.append(('analyse','once')); return 'plan'
+        self.assertEqual(run_once(Gateway(),Telegram(),Slack(),'1','C1','telegram:1'),{})
+        self.assertEqual([item[0] for item in events], ['telegram','slack','analyse','telegram','slack'])
 
-    def test_service_rejects_unlisted_owner_before_plan_creation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            store = PlanStore(Path(directory) / "plans.sqlite3")
-            from pere_blaise.broker import Broker
-            service = LocalService(Broker(store, Path("/not-used"), Path(directory) / "run"), {"123"})
-            with self.assertRaises(PermissionError):
-                service.dispatch({"operation": "create", "owner": "999", "manifest": {}, "details": {}})
+    def test_exact_confidence_threshold(self):
+        for i in range(5): self.source(f'f{i}.txt', str(i).encode())
+        def planner(context):
+            actions = self.planner(context)['actions']
+            actions[0]['destination_relative'] = 'a_trier/' + actions[0]['source_relative']
+            actions[0]['certainty'] = 'uncertain'
+            return {'actions': actions}
+        plan = analyse('telegram:1', self.root, self.broker, planner, 1000)
+        self.assertEqual(plan['details']['confidence'], 'Low')
+        self.assertEqual(plan['details']['a_trier_percent'], 20.0)
 
-    def test_router_accepts_only_exact_privileged_commands(self) -> None:
-        self.assertEqual(parse_message("range P-ABC234"), Command("range", "P-ABC234"))
-        self.assertEqual(parse_message("range P-ABCDEFG234"), Command("range", "P-ABCDEFG234"))
-        self.assertEqual(parse_message("détail p-abcdefg234"), Command("detail", "P-ABCDEFG234"))
-        self.assertEqual(parse_message("detail Azuré-Héron"), Command("detail", "azuré-héron"))
-        self.assertEqual(parse_message("analyse"), Command("analyse"))
-        self.assertEqual(parse_message("apprentissages"), Command("learning"))
-        self.assertEqual(parse_message("envoie une attestation"), Command("send", "une attestation"))
-        self.assertIsNone(parse_message("envoie-moi une attestation"))
-        self.assertIsNone(parse_message("range P-ABCDEFG234; rm -rf /"))
-        self.assertIsNone(parse_message("range dernier plan"))
+    def test_confidence_below_twenty_percent_is_medium(self):
+        for i in range(6): self.source(f'f{i}.txt', str(i).encode())
+        def planner(context):
+            actions = self.planner(context)['actions']
+            actions[0]['destination_relative'] = 'a_trier/' + actions[0]['source_relative']
+            actions[0]['certainty'] = 'uncertain'
+            return {'actions': actions}
+        plan = analyse('telegram:1', self.root, self.broker, planner, 1000)
+        self.assertEqual(plan['details']['confidence'], 'Medium')
 
-    def test_plan_id_accepts_unicode_normalization_for_two_french_words(self) -> None:
-        self.assertEqual(canonical_plan_id("azur\u0065\u0301-he\u0301ron"), "azuré-héron")
+    def test_opaque_name_forces_low_even_if_model_claims_clear(self):
+        self.source('1245487654657564jhkjh.pdf')
+        plan = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        self.assertEqual(plan['details']['confidence'], 'Low')
 
-    def test_planner_never_receives_document_names_or_hashes(self) -> None:
-        inventory = {"downloads": {"files": [{"path": "x.pdf", "size": 2, "extension": ".pdf", "expected": {"sha256": "a" * 64}}]},
-                     "documents": {"root": "/Documents", "files": [{"path": "secret/client.pdf"}, {"path": "A/file.pdf"}]}}
-        context = planner_context(inventory)
-        self.assertNotIn("expected", context["untrusted_downloads"][0])
-        self.assertNotIn("secret/client.pdf", str(context))
-        manifest = manifest_from_proposal({"actions": [{"source": "x.pdf", "destination": "À_trier/x.pdf"}]}, inventory)
-        self.assertEqual(manifest["actions"][0]["expected"]["sha256"], "a" * 64)
+    def test_casefold_collision_and_no_unknown_source(self):
+        self.source('A.txt')
+        (self.o / 'Factures' / 'a.TXT').write_text('existing')
+        with self.assertRaises(ValueError): analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        self.assertTrue((self.d / 'A.txt').exists())
 
-    def test_planner_explanatory_fields_are_discarded_before_manifest_creation(self) -> None:
-        inventory = {"downloads": {"files": [{"path": "x.pdf", "expected": {
-            "device": 1, "inode": 1, "size": 1, "mtime_ns": 1, "sha256": "a" * 64}}]}}
-        manifest = manifest_from_proposal({"confidence": "low", "actions": [{
-            "source": "x.pdf", "destination": "À_trier/x.pdf", "explanation": "untrusted",
-        }]}, inventory)
-        self.assertEqual(manifest, {"version": 2, "actions": [{"source": "x.pdf", "destination": "À_trier/x.pdf",
-                         "expected": {"device": 1, "inode": 1, "size": 1, "mtime_ns": 1, "sha256": "a" * 64}}]})
+    def test_unicode_normalization_preserves_real_disk_name(self):
+        actual = 'cafe\u0301.txt'
+        self.source(actual)
+        plan = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        self.assertEqual(plan['manifest']['actions'][0]['source'], actual)
+        self.assertEqual(plan['manifest']['actions'][0]['destination'], 'Factures/' + actual)
 
-    def test_analysis_creates_only_a_proposed_plan(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory); (home / "Downloads").mkdir(); (home / "Documents").mkdir()
-            (home / "Downloads" / "invoice.pdf").write_text("invoice")
-            store = PlanStore(home / "plans.sqlite3")
-            broker = __import__("pere_blaise.broker", fromlist=["Broker"]).Broker(store, Path("/not-used"), home / "runtime")
-            plan = analyse("123", home, broker,
-                           lambda context: {"actions": [{"source": "invoice.pdf", "destination": "À_trier/invoice.pdf"}]},
-                           1024)
-            self.assertEqual(plan["state"], "proposed")
-            self.assertTrue((home / "Downloads" / "invoice.pdf").exists())
+    def test_symlinked_download_excluded_and_parent_denied(self):
+        target = self.root / 'outside'; target.write_text('private')
+        (self.d / 'link.txt').symlink_to(target)
+        result = scan(self.d, hash_files=True, sha256_max_bytes=1000)
+        self.assertEqual(result['files'], [])
+        self.assertEqual(result['excluded_count'], 1)
+        nested = self.o / 'Nested'; nested.symlink_to(self.root, target_is_directory=True)
+        self.source('x.txt')
+        with self.assertRaises(ValueError):
+            analyse('telegram:1', self.root, self.broker, lambda c: {'actions': [{'source_relative': 'x.txt',
+                'destination_relative': 'Nested/x.txt', 'reason': 'x', 'certainty': 'clear'}]}, 1000)
 
-    def test_broker_uses_configured_plan_ttl(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); source = root / "source.pdf"; source.write_text("x")
-            store = PlanStore(root / "plans.sqlite3")
-            from pere_blaise.broker import Broker
-            broker = Broker(store, Path("/not-used"), root / "run", plan_ttl_hours=1)
-            plan = broker.create_plan("123", manifest_for(source), {})
-            self.assertIn("+00:00", plan["expires_at"])
+    def test_file_size_limit_refuses_entire_inventory(self):
+        self.source('small.txt', b'a'); self.source('large.txt', b'large')
+        with self.assertRaises(ValueError): analyse('telegram:1', self.root, self.broker, self.planner, 1)
+        self.assertFalse(any(self.b.iterdir()))
 
-    def test_manual_move_from_a_trier_becomes_private_learning_hint(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory); downloads = home / "Downloads"; documents = home / "Documents"
-            downloads.mkdir(); documents.mkdir()
-            source = downloads / "facture edf janvier.pdf"; source.write_text("invoice")
-            store = PlanStore(home / "plans.sqlite3")
-            manifest = manifest_for(source, "a_trier/facture edf janvier.pdf")
-            plan = store.create(owner="123", manifest=manifest, details={})
-            store.claim(plan["id"], "123")
-            staged = documents / "a_trier" / source.name; staged.parent.mkdir(); staged.write_text("invoice")
-            info = staged.stat()
-            store.finish(plan["id"], {"actions": [{"source": source.name, "destination": "a_trier/" + source.name,
-                "status": "applied", "destination_identity": {"device": info.st_dev, "inode": info.st_ino,
-                "mtime_ns": info.st_mtime_ns}}]})
-            target = documents / "Administratif" / source.name; target.parent.mkdir(); staged.rename(target)
-            inventory = {"root": str(documents), "files": scan(documents, hash_files=False, sha256_max_bytes=1024)["files"]}
-            result = store.reconcile_a_trier(inventory, documents, 1024)
-            self.assertEqual(result, {"learned": 1, "missing": []})
-            hints = store.learning_hints([{"path": "facture edf fevrier.pdf", "extension": ".pdf"}])
-            self.assertEqual(hints, [{"source": "facture edf fevrier.pdf", "suggested_directory": "Administratif", "evidence_count": 1}])
+    def test_backup_space_refusal_precedes_first_movement(self):
+        from unittest.mock import patch
+        p = self.source()
+        manifest = {'version': 2, 'actions': [{'source': p.name, 'destination': 'Factures/' + p.name,
+                                               'expected': fingerprint(p).as_dict()}]}
+        class Usage:
+            free = 0
+        with patch('pere_blaise.executor.shutil.disk_usage', return_value=Usage()):
+            with self.assertRaises(TransactionError): self.broker.executor.apply('calme-arbre', manifest)
+        self.assertTrue(p.exists())
+        self.assertFalse((self.o/'Factures'/p.name).exists())
+        self.assertFalse((self.b/'calme-arbre').exists())
 
-    def test_missing_a_trier_file_is_reported_then_forgotten(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory); documents = home / "Documents"; documents.mkdir()
-            store = PlanStore(home / "plans.sqlite3")
-            with store._connect() as connection:
-                connection.execute("""INSERT INTO a_trier_tracking
-                    (source_path, source_extension, source_size, source_mtime_ns, source_sha256, a_trier_path, device, inode, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    ("orphan.pdf", ".pdf", 1, 1, "a" * 64, "a_trier/orphan.pdf", 1, 1, "now"))
-            inventory = {"root": str(documents), "files": []}
-            self.assertEqual(store.reconcile_a_trier(inventory, documents, 1024),
-                             {"learned": 0, "missing": ["a_trier/orphan.pdf"]})
-            self.assertEqual(store.reconcile_a_trier(inventory, documents, 1024), {"learned": 0, "missing": []})
+    def test_broker_records_preflight_rejection_without_movement(self):
+        from unittest.mock import patch
+        p = self.source()
+        manifest = {'version': 2, 'actions': [{'source': p.name, 'destination': 'Factures/' + p.name,
+                                               'expected': fingerprint(p).as_dict()}]}
+        plan = self.broker.create_plan('telegram:1', manifest, {'actions': []})
+        class Usage:
+            free = 0
+        with patch('pere_blaise.executor.shutil.disk_usage', return_value=Usage()):
+            result = self.broker.apply('telegram:1', plan['id'])
+        self.assertEqual(result['state'], 'REJECTED')
+        self.assertEqual(result['code'], 'PB-BACKUP-SPACE')
+        self.assertEqual(self.store.get(plan['id'])['state'], 'rejected')
+        self.assertTrue(p.exists())
 
-    def test_learning_status_is_separate_from_plan_detail(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            store = PlanStore(Path(directory) / "plans.sqlite3")
-            with store._connect() as connection:
-                connection.execute("INSERT INTO learning_events (event_type, source_path, destination, created_at, expires_at) "
-                                   "VALUES (?, ?, ?, ?, ?)",
-                                   ("learned", "invoice.pdf", "Administratif", "now", "9999-01-01T00:00:00+00:00"))
-            status = store.learning_status()
-            self.assertEqual(status["pending"], 0)
-            self.assertEqual(status["examples"], 0)
-            self.assertEqual(status["events"][0]["destination"], "Administratif")
+    def test_invalidation_on_content_edit_even_same_size(self):
+        self.source(); plan = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        (self.d / 'facture.txt').write_bytes(b'edit')
+        with self.assertRaises(ValueError): self.broker.apply('telegram:1', plan['id'])
+        self.assertFalse(any(self.b.iterdir()))
 
-    def test_learning_hints_do_not_expose_historic_document_names(self) -> None:
-        inventory = {"downloads": {"files": [{"path": "facture edf.pdf", "size": 2, "extension": ".pdf"}]},
-                     "documents": {"root": "/Documents", "files": [], "directories": ["Administratif"]}}
-        context = planner_context(inventory, learning_hints=[{"source": "facture edf.pdf",
-            "suggested_directory": "Administratif", "evidence_count": 2}])
-        self.assertEqual(context["learning_hints"][0]["suggested_directory"], "Administratif")
-        self.assertNotIn("ancien document prive.pdf", str(context))
+    def test_learning_duplicate_hash_remains_pending(self):
+        p = self.source('opaque.txt', b'contents')
+        manifest = {'version': 2, 'actions': [{'source': p.name, 'destination': 'a_trier/' + p.name,
+                                               'expected': fingerprint(p).as_dict()}]}
+        plan = self.broker.create_plan('telegram:1', manifest, {'actions': [], 'snapshot': None})
+        self.broker.apply('telegram:1', plan['id'])
+        (self.o / 'a_trier' / p.name).rename(self.o / 'Factures' / 'renamed.txt')
+        (self.o / 'Factures' / 'copy.txt').write_bytes(b'contents')
+        docs = scan(self.o, hash_files=False, sha256_max_bytes=1000)
+        outcome = self.store.reconcile_a_trier(docs, self.o, 1000)
+        self.assertEqual(outcome['learned'], 0)
+        self.assertEqual(self.store.learning_status()['pending'], 1)
 
-    def test_analysis_refuses_to_call_planner_when_no_download_is_visible(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory); (home / "Downloads").mkdir(); (home / "Documents").mkdir()
-            store = PlanStore(home / "plans.sqlite3")
-            broker = __import__("pere_blaise.broker", fromlist=["Broker"]).Broker(store, Path("/not-used"), home / "runtime")
-            with self.assertRaisesRegex(ValueError, "no eligible downloads"):
-                analyse("123", home, broker, lambda context: self.fail("planner must not be called"), 1024)
+    def test_operator_learning_correction_and_erasure(self):
+        now = datetime.now(timezone.utc)
+        with sqlite3.connect(self.store.database) as db:
+            cursor = db.execute('INSERT INTO learning_examples (source_name,extension,size,destination_directory,learned_at,expires_at) VALUES (?,?,?,?,?,?)',
+                                ('facture.txt','.txt',4,'a_trier',now.isoformat(),(now+timedelta(days=90)).isoformat()))
+            example_id = cursor.lastrowid
+        self.assertTrue(self.store.correct_learning_example(example_id, 'Factures', self.o))
+        self.assertEqual(self.store.list_learning_examples()[0]['destination_directory'], 'Factures')
+        self.assertTrue(self.store.delete_learning_example(example_id))
+        self.assertEqual(self.store.list_learning_examples(), [])
 
-    def test_analysis_retries_one_invalid_planner_reply_before_creating_plan(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory); (home / "Downloads").mkdir(); (home / "Documents").mkdir()
-            (home / "Downloads" / "invoice.pdf").write_text("invoice")
-            store = PlanStore(home / "plans.sqlite3")
-            broker = __import__("pere_blaise.broker", fromlist=["Broker"]).Broker(store, Path("/not-used"), home / "runtime")
-            replies = iter([{"confidence": "low"}, {"actions": [{"source": "invoice.pdf", "destination": "À_trier/invoice.pdf"}]}])
-            contexts = []
-            def planner(context):
-                contexts.append(context)
-                return next(replies)
-            plan = analyse("123", home, broker, planner, 1024)
-            self.assertEqual(plan["state"], "proposed")
-            self.assertIn("planner_retry_requirement", contexts[1])
+    def test_sqlite_backup_restore(self):
+        script = Path(__file__).resolve().parents[1] / 'scripts' / 'state-backup.py'
+        p = self.source()
+        plan = self.broker.create_plan('telegram:1', {'version': 2, 'actions': [{'source': p.name,
+            'destination': 'Factures/' + p.name, 'expected': fingerprint(p).as_dict()}]}, {'actions': []})
+        backup = self.root / 'backup.sqlite3'
+        restored = self.root / 'restored.sqlite3'
+        first = subprocess.run([sys.executable, str(script), 'backup', '--source', str(self.store.database),
+                                '--destination', str(backup)], capture_output=True, text=True)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = subprocess.run([sys.executable, str(script), 'restore', '--source', str(backup),
+                                 '--destination', str(restored)], capture_output=True, text=True)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIsNotNone(PlanStore(restored).get(plan['id']))
 
-    def test_analysis_excludes_existing_destination_before_storing_plan(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory); (home / "Downloads").mkdir(); (home / "Documents").mkdir()
-            (home / "Downloads" / "keep.pdf").write_text("keep")
-            (home / "Downloads" / "collision.pdf").write_text("collision")
-            (home / "Documents" / "collision.pdf").write_text("already here")
-            store = PlanStore(home / "plans.sqlite3")
-            broker = __import__("pere_blaise.broker", fromlist=["Broker"]).Broker(store, Path("/not-used"), home / "runtime")
-            plan = analyse("123", home, broker, lambda context: {"actions": [
-                {"source": "keep.pdf", "destination": "a_trier/keep.pdf"},
-                {"source": "collision.pdf", "destination": "collision.pdf"},
-            ]}, 1024)
-            self.assertEqual([item["source"] for item in plan["manifest"]["actions"]], ["keep.pdf"])
-            self.assertEqual(plan["details"]["confidence"], "low")
-            self.assertEqual(plan["details"]["excluded"][0]["reason"], "destination_already_exists")
 
-    def test_analysis_excludes_symlinked_destination_parent(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory); (home / "Downloads").mkdir(); (home / "Documents").mkdir()
-            outside = home / "outside"; outside.mkdir()
-            os.symlink(outside, home / "Documents" / "linked")
-            (home / "Downloads" / "example.pdf").write_text("content")
-            store = PlanStore(home / "plans.sqlite3")
-            broker = __import__("pere_blaise.broker", fromlist=["Broker"]).Broker(store, Path("/not-used"), home / "runtime")
-            with self.assertRaisesRegex(ValueError, "no proposed action"):
-                analyse("123", home, broker, lambda context: {"actions": [
-                    {"source": "example.pdf", "destination": "linked/example.pdf"},
-                ]}, 1024)
-
-    def test_delivery_search_is_metadata_only_and_skips_symlinks(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            documents = Path(directory) / "Documents"; documents.mkdir()
-            (documents / "Rapport client.pdf").write_text("not read by search")
-            outside = Path(directory) / "outside.pdf"; outside.write_text("private")
-            os.symlink(outside, documents / "Rapport lien.pdf")
-            matches = search_documents(documents, "rapport client")
-            self.assertEqual([path.name for path in matches], ["Rapport client.pdf"])
-
-    def test_delivery_search_ignores_french_stop_words(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            documents = Path(directory) / "Documents"; documents.mkdir()
-            (documents / "FFTir").mkdir()
-            (documents / "FFTir" / "attestation club.pdf").write_text("not read by search")
-            matches = search_documents(documents, "une attestation")
-            self.assertEqual([path.name for path in matches], ["attestation club.pdf"])
-
-    def test_telegram_log_error_codes_do_not_echo_untrusted_paths(self) -> None:
-        self.assertEqual(_error_code(ValueError("source contains control or invisible formatting characters")),
-                         "planner_unsafe_path")
-        self.assertEqual(_error_code(ValueError("proposal contains unknown source or duplicate destination")),
-                         "planner_unknown_source_or_duplicate_destination")
-        self.assertEqual(_error_code(ValueError("destination must be a non-empty relative path")),
-                         "planner_unsafe_path")
-        self.assertEqual(_error_code(ValueError("proposal actions is empty")), "planner_empty_actions")
-        self.assertEqual(_user_error(ValueError("plan has expired")),
-                         "E-PLAN-EXPIRED — Ce plan a expiré : lance une nouvelle analyse.")
-
-    def test_launchd_renderer_schedules_weekly_analysis_on_sunday_at_18(self) -> None:
-        spec = importlib.util.spec_from_file_location("launchd_renderer", ROOT / "scripts" / "render-launchd-plists.py")
-        assert spec and spec.loader
-        renderer = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(renderer)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); control = root / "control"; control.mkdir()
-            (control / "broker.json").write_text(json.dumps({"telegram_allowed_user_ids": ["123"]}))
-            project = root / "project"
-            venv_python = project / ".venv/bin/python"
-            venv_python.parent.mkdir(parents=True)
-            venv_python.write_text("")
-            rendered = renderer.render(project, control)
-            self.assertNotIn("com.local.pere-blaise-weekly-analysis", rendered)
-            rendered = renderer.render(project, control, include_weekly=True)
-            weekly = rendered["com.local.pere-blaise-weekly-analysis"]
-            self.assertEqual(weekly["StartCalendarInterval"], {"Weekday": 0, "Hour": 18, "Minute": 0})
-            self.assertNotIn("--apply", weekly["ProgramArguments"])
-            self.assertEqual(weekly["ProgramArguments"][0], str(venv_python))
-            self.assertNotIn("com.local.pere-blaise-slack", rendered)
-            (control / "slack.env").write_text("SLACK_APP_TOKEN=xapp-test\n")
-            with_slack = renderer.render(project, control)
-            self.assertEqual(with_slack["com.local.pere-blaise-slack"]["ProgramArguments"][2],
-                             "pere_blaise.slack_gateway")
-
-    def test_deployed_compose_keeps_planner_capability_limited(self) -> None:
-        compose = (ROOT / "infra/docker/docker-compose.planner.yml").read_text(encoding="utf-8")
-        for required in ("container_name: hermes-pere-blaise", "127.0.0.1:8643:8642", ":/opt/data/config.yaml:ro",
-                         "external: true", "pids_limit: 128", "cpus: 1.0", "mem_limit: 1536m",
-                         "no-new-privileges:true"):
-            self.assertIn(required, compose)
-        self.assertNotIn("cap_drop:", compose)
-        for forbidden in ("/var/run/docker.sock", ":/Users/", ":/home/", ":/root/", "/opt/data/auth.json:ro"):
-            self.assertNotIn(forbidden, compose)
-
-    def test_slack_accepts_only_allowlisted_mentions_and_replies_in_thread(self) -> None:
-        class FakeSlack:
-            def __init__(self): self.replies = []
-            def reply(self, channel, thread_ts, text): self.replies.append((channel, thread_ts, text))
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); planner = root / "planner.env"; planner.write_text("PERE_BLAISE_API_KEY=x\n")
-            config = {"telegram_allowed_user_ids": ["telegram-owner"], "slack_allowed_user_ids": ["U-owner"],
-                      "database": str(root / "plans.sqlite3"), "sha256_max_bytes": 1024,
-                      "executor": "/not-used", "runtime_dir": str(root / "run"), "socket": str(root / "broker.sock")}
-            slack = FakeSlack()
-            gateway = SlackGateway(config, slack, ROOT, planner, "C-allowed", {"U-owner"})
-            gateway.gateway._learning = lambda owner: "apprentissages pour " + owner
-            event = {"type": "events_api", "payload": {"event_id": "Ev-1", "event": {
-                "type": "app_mention", "channel": "C-allowed", "user": "U-owner", "ts": "100.1",
-                "thread_ts": "100.0", "text": "<@B-bot> apprentissages"}}}
-            gateway.handle_envelope(event)
-            self.assertEqual(slack.replies, [("C-allowed", "100.0", "apprentissages pour U-owner")])
-            gateway.handle_envelope(event)
-            gateway.handle_envelope({"type": "events_api", "payload": {"event_id": "Ev-2", "event": {
-                "type": "app_mention", "channel": "C-other", "user": "U-owner", "ts": "200.1", "text": "<@B-bot> apprentissages"}}})
-            gateway.handle_envelope({"type": "events_api", "payload": {"event_id": "Ev-3", "event": {
-                "type": "app_mention", "channel": "C-allowed", "user": "U-other", "ts": "300.1", "text": "<@B-bot> apprentissages"}}})
-            self.assertEqual(len(slack.replies), 1)
+if __name__ == '__main__': unittest.main()

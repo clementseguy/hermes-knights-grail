@@ -1,6 +1,3 @@
-# Réseau et identités
+# Réseau
 
-- Hôte : Telegram et Slack sortants uniquement, pour les relais déterministes.
-- Hôte → planificateur : `127.0.0.1:8643` uniquement.
-- Conteneur : fournisseur de modèle configuré dans `auth.json` privé uniquement ; aucun accès à l’hôte, aux bibliothèques ou aux sockets.
-- Toute nouvelle destination réseau exige une revue du propriétaire et un test de refus.
+Hermes et broker communiquent sur le réseau Compose privé ; aucun port n'est publié. Le réseau `outbound` permet OAuth/modèle et API Telegram/Slack. Une restriction vérifiée par domaine n'est pas encore fournie par Compose : l'activation exige une décision et un contrôle réseau supplémentaire. Les identités et secrets des canaux restent uniquement dans le broker.

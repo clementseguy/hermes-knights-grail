@@ -6,14 +6,15 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 
-def planner_request(endpoint: str, api_key: str, model: str, system_prompt: str, context: dict[str, Any]) -> dict[str, Any]:
+def planner_request(endpoint: str, api_key: str, model: str, system_prompt: str, context: dict[str, Any],
+                    timeout: int = 120) -> dict[str, Any]:
     body = {"model": model, "stream": False, "messages": [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(context, ensure_ascii=False, sort_keys=True)},
     ]}
     request = Request(endpoint.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode("utf-8"),
                       headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}, method="POST")
-    with urlopen(request, timeout=120) as response:  # nosec: operator-provided loopback URL only
+    with urlopen(request, timeout=timeout) as response:  # nosec: fixed internal Compose endpoint
         payload = json.load(response)
     try:
         proposal = json.loads(payload["choices"][0]["message"]["content"])

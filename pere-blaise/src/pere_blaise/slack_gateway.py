@@ -18,11 +18,10 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from .router import parse_message
-from .telegram_gateway import Gateway, _env_value, _error_code, _user_error
+from .telegram_gateway import Gateway, _env_value, _user_error
 
 
-HELP = "Commandes : analyse · apprentissages · détail <id> · range <id>."
-SLACK_SEND_UNAVAILABLE = "L’envoi de fichiers reste disponible sur Telegram uniquement."
+HELP = "Commandes : analyse · apprentissages · détaille <id> · range <id> · envoie <nom>."
 
 
 def _csv(value: str) -> set[str]:
@@ -34,6 +33,7 @@ class Slack:
 
     def __init__(self, bot_token: str, app_token: str) -> None:
         self.bot_token, self.app_token = bot_token, app_token
+        self.send_max_bytes = 50 * 1024 * 1024
 
     def call(self, method: str, payload: dict[str, Any], *, app_token: bool = False) -> dict[str, Any]:
         token = self.app_token if app_token else self.bot_token
@@ -60,6 +60,22 @@ class Slack:
             part, text = text[:3900], text[3900:]
             self.call("chat.postMessage", {"channel": channel, "thread_ts": thread_ts, "text": part})
 
+    def document(self, channel: str, thread_ts: str, path: Path, content: bytes) -> None:
+        from urllib.parse import urlparse
+        if len(content) > self.send_max_bytes:
+            raise ValueError('PB-SEND-LIMIT')
+        ticket = self.call('files.getUploadURLExternal', {'filename': path.name, 'length': len(content)})
+        upload_url = ticket.get('upload_url')
+        file_id = ticket.get('file_id')
+        parsed = urlparse(upload_url) if isinstance(upload_url, str) else None
+        if not parsed or parsed.scheme != 'https' or not parsed.hostname or not parsed.hostname.endswith('.slack.com') or not isinstance(file_id, str):
+            raise ValueError('PB-SEND-FAILED')
+        with urlopen(Request(upload_url, data=content, headers={'Content-Type': 'application/octet-stream'}, method='POST'), timeout=180) as response:
+            if response.status != 200:
+                raise ValueError('PB-SEND-FAILED')
+        self.call('files.completeUploadExternal', {'files': [{'id': file_id, 'title': path.name}],
+                                                   'channel_id': channel, 'thread_ts': thread_ts})
+
 
 class SlackGateway:
     def __init__(self, config: dict[str, Any], slack: Slack, project: Path, planner_env: Path, channel: str, users: set[str]) -> None:
@@ -67,6 +83,7 @@ class SlackGateway:
             raise ValueError("Slack allowlists are required")
         self.gateway = Gateway(config, None, project, planner_env)
         self.slack, self.channel, self.users = slack, channel, users
+        self.slack.send_max_bytes = int(config['send_max_bytes'])
         self._event_ids: set[str] = set()
         self._event_order: deque[str] = deque(maxlen=2048)
 
@@ -111,14 +128,18 @@ class SlackGateway:
         if text is None:
             return
         command = parse_message(text)
-        if command is None:
+        owner = self.gateway.owner('slack', sender)
+        if command is None and not text.isdecimal():
             self.slack.reply(channel, reply_thread, HELP)
             return
         try:
-            response = SLACK_SEND_UNAVAILABLE if command.name == "send" else self.gateway._dispatch(command, sender, "")
+            if command and command.name in ('analyse', 'range', 'send'):
+                self.slack.reply(channel, reply_thread, 'Opération en cours ; résultat à suivre dans ce fil.')
+            deliver = lambda path, content: self.slack.document(channel, reply_thread, path, content)
+            context = 'slack:' + channel + ':' + reply_thread
+            response = self.gateway.select(owner, text, deliver, context) if text.isdecimal() else self.gateway.dispatch(command, owner, deliver, context)
         except Exception as exc:
-            print(f"slack command rejected: command={command.name} error_type={type(exc).__name__} "
-                  f"error_code={_error_code(exc)}", file=sys.stderr, flush=True)
+            print(f"slack command rejected: error_type={type(exc).__name__}", file=sys.stderr, flush=True)
             response = _user_error(exc)
         self.slack.reply(channel, reply_thread, response)
 
@@ -145,7 +166,7 @@ def run(gateway: SlackGateway, socket_factory: Any) -> int:
         except KeyboardInterrupt:
             return 0
         except Exception as exc:
-            print(f"slack socket reconnect: error_type={type(exc).__name__} error_code={_error_code(exc)}", file=sys.stderr, flush=True)
+            print(f"slack socket reconnect: error_type={type(exc).__name__}", file=sys.stderr, flush=True)
             time.sleep(delay)
             delay = min(delay * 2, 30)
         finally:

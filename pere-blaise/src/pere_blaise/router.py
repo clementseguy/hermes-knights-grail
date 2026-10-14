@@ -12,7 +12,7 @@ from typing import Optional
 from .contracts import canonical_plan_id
 
 SEND_PREFIX = "envoie "
-DETAIL = re.compile(r"d[ée]tail\s+(\S+)", re.IGNORECASE)
+DETAIL = re.compile(r"d[ée]tail(?:le)?\s+(\S+)", re.IGNORECASE)
 RANGE = re.compile(r"range\s+(\S+)", re.IGNORECASE)
 
 

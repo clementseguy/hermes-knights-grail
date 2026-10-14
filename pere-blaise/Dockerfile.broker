@@ -1,0 +1,10 @@
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+WORKDIR /app
+COPY pyproject.toml /app/
+COPY src /app/src
+COPY prompts /app/prompts
+COPY scripts/learning-admin.py scripts/state-backup.py /app/scripts/
+RUN pip install --no-cache-dir . && useradd --uid 10000 --create-home pb && mkdir /state && chown 10000:10000 /state && chmod 0700 /state
+USER 10000:10000
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "-m", "pere_blaise.app"]

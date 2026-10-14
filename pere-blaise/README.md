@@ -1,189 +1,31 @@
-# Père Blaise
+# Père Blaise — état de réalisation
 
-Assistant personnel local qui organise `Downloads` vers `Documents` et envoie
-des fichiers depuis `Documents`. Telegram est son canal personnel additionnel ;
-Slack est son canal d’équipe standard. Ce répertoire
-est la source versionnable de l'agent. Il ne contient aucun secret ni état
-d'exécution.
+Père Blaise propose un classement des fichiers réguliers visibles de `Downloads` vers des dossiers existants de `Documents`, puis applique **uniquement** `range <ID>` demandé par l'auteur du plan. Il recherche un fichier par son seul basename et peut l'envoyer en pièce jointe Telegram ou Slack. L'exploitant est Clément. L'activation réelle reste en attente de la recette et des identités/secrets privés.
 
-## Registre de décision
+Les contrats de référence sont [SPECIFICATIONS_FONCTIONNELLES.md](SPECIFICATIONS_FONCTIONNELLES.md) et [SPECIFICATIONS_TECHNIQUES.md](SPECIFICATIONS_TECHNIQUES.md). La convention commune est [../AGENTS.md](../AGENTS.md). La révision locale Hermes lue est `bd0affe5` ; l'image présente sous le digest de `compose.yaml` annonce **v0.21.6, upstream `818c13be`**. Le digest est épinglé, mais une authentification OAuth de test et un appel modèle restent à vérifier avant activation.
 
-| Champ | Décision |
-| --- | --- |
-| Propriétaire | Clément — décisions de périmètre, coût et activation des canaux. |
-| Mission / hors périmètre | Proposer et appliquer, après validation explicite, des classements `Downloads → Documents`. Hors périmètre : contenu des documents, Bureau, suppression définitive, modification autonome de Documents et sorties vers des tiers. |
-| Slug | `pere-blaise`. Toutes les nouvelles identités de déploiement utilisent ce slug sans compatibilité implicite. |
-| Audience | Canal Slack privé `#agent-pere-blaise` et application dédiée existants ; leurs secrets et leur connectivité doivent être revalidés dans le nouveau runtime. Membres explicitement autorisés seulement. Telegram : uniquement le chat privé de l’identifiant autorisé dans le runtime privé. |
-| Modèle / abonnement | `openai-codex` via l’abonnement ChatGPT/Codex, modèle par défaut `gpt-5.4`, authentifié par OAuth dans le runtime privé. Le planificateur Hermes est joignable seulement sur `127.0.0.1:8643` ; aucun repli automatique n’est permis. |
-| Mémoire | Mémoire Hermes générale désactivée. L’apprentissage local SQLite ne conserve que les corrections de classement, trois mois ; voir « Apprentissage local ». |
-| Toolsets / écriture | Session API sans toolset. Le processus hôte n’écrit que via l’exécuteur vérifié, après `range`. |
-| Montages, réseau et secrets | Conteneur sans bibliothèques, `$HOME`, sockets Docker/broker ou token Telegram. API publiée uniquement sur loopback. Le runtime privé est recréé sous la racine de déploiement autorisée, jamais dans Git. |
-| Validation humaine | `range` est requis pour chaque déplacement ; recommandations de hiérarchie et apprentissages ne modifient jamais Documents. |
-| Planification / alertes | Analyse hebdomadaire dimanche 18 h locale, créée en pause au premier démarrage. Alertes, sauvegarde et procédure d’arrêt sont documentées dans le runbook. |
-| Exceptions / revue | Mémoire générale désactivée : approuvée par le propriétaire le 13 octobre 2026, revue le 13 janvier 2027. Le planificateur HTTP local est documenté dans [`docs/policy.md`](docs/policy.md) : aucun changement de fournisseur n’est impliqué. |
+## Commandes
 
-Le contrat Slack et sa procédure de mise en service sont dans
-[`infra/slack/README.md`](infra/slack/README.md). Telegram ne remplace pas
-Slack ; les deux canaux restent cloisonnés et soumis à leur allowlist propre.
+- `analyse` : plan complet, aucun mouvement ; un nouveau plan invalide l'ancien ; échéance 30 minutes.
+- `détaille <ID>` : actions, raison de chaque destination, pourcentage `a_trier`, échéance.
+- `range <ID>` : accord final de l'auteur ; backups vérifiés avant mouvement, journal, rollback/récupération.
+- `envoie <nom>` : recherche insensible à la casse et aux accents sur les basenames ; zéro, un ou tous les résultats. Après plusieurs résultats, répondre avec le numéro choisi.
+- `apprentissages` : observations et suivis locaux, ainsi que chemin du backup ; correction/effacement par l'exploitant hors ligne.
 
-## Fonctions
+Les identités sont `(plateforme, ID)` : `telegram:...` et `slack:...` restent distinctes, sauf association explicite dans `identity_map` privé après vérification humaine. Telegram n'accepte que le chat privé du compte autorisé. Slack n'accepte que les mentions dans le canal privé configuré et répond dans le fil. Les API de livraison sont natives ; aucun document n'est transmis au modèle. Les membres du canal Slack privé peuvent voir les noms et pièces jointes du canal.
 
-- `analyse` : lit les métadonnées de `Downloads` et `Documents`, rapproche les
-  corrections manuelles sorties de `Documents/a_trier`, puis crée un plan à
-  durée de vie limitée ; aucun fichier n'est modifié.
-- `détail <adjectif-nom>` : affiche le plan complet, ses exclusions et d'éventuelles
-  recommandations d'organisation, sans limiter la liste des actions.
-- `apprentissages` : affiche séparément les exemples retenus, les suivis
-  abandonnés et le nombre de fichiers en attente dans `a_trier`.
-- `range <adjectif-nom>` : applique précisément ce plan, une seule fois, via
-  l'exécuteur local vérifié.
-- `envoie <recherche>` : cherche exclusivement dans `Documents`, envoie le
-  seul résultat clair ou demande de choisir parmi une courte liste.
-- une analyse hebdomadaire le dimanche à 18 h produit seulement un plan.
+## Décisions d'architecture
 
-## Modèle de sécurité
+Le service Compose `pere-blaise` exécute Hermes comme planificateur avec `openai-codex`, mémoire générale désactivée et `platform_toolsets.api_server: []`. Le service `broker` est le seul à monter `Downloads`, `Documents`, backups et son volume SQLite privé. Les tokens de canal restent hors dépôt dans un dossier privé monté en lecture seule. Aucun socket Docker, dépôt entier, `$HOME` ni dossier personnel supplémentaire n'est monté dans Hermes. Le broker n'expose aucun port public. Le réseau Compose sortant n'impose pas encore une allowlist de domaines vérifiée : point bloquant de la revue d'isolation.
 
-Le planificateur Hermes reçoit les métadonnées des fichiers de `Downloads`, la
-liste et des statistiques des répertoires de `Documents`, et des indices de
-classement calculés localement. Il ne reçoit jamais les noms, chemins, tailles,
-dates ou empreintes des fichiers déjà présents dans `Documents`. Il n'a ni
-montage `Documents` ou `Downloads`, ni socket Docker, ni token Telegram. Son
-unique rôle est de proposer des destinations et des recommandations non
-opératives.
+Le modèle ne reçoit que les noms et métadonnées minimales des téléchargements, les dossiers existants de Documents et les indices d'apprentissage. Il ne reçoit ni noms des fichiers déjà classés, ni hash, ni octets. Le broker reconstruit le manifeste à partir de l'inventaire local et rejette une action absente, en double, renommée, hors dossier ou en collision. Seul `a_trier` peut être créé. Le classement est `High` si zéro `a_trier` sans nom opaque ; `Medium` si strictement moins de 20 % vers `a_trier` sans nom opaque ; `Low` sinon.
 
-Chaque fichier appliqué dans `a_trier` est suivi localement par son identité de
-système de fichiers. Lorsqu'il est ensuite déplacé manuellement dans
-`Documents`, Père Blaise crée un exemple local conservé trois mois. Si le
-fichier disparaît de `Documents`, le suivi est supprimé et
-`apprentissages` permet de constater cet événement. Les noms historiques restent dans SQLite local : seul un indice de
-destination pour le téléchargement courant atteint le planificateur. Un
-SHA-256 peut être calculé localement pour départager des candidats ambigus ; il
-n'est jamais transmis au planificateur.
+L'exception de mémoire Hermes désactivée, approuvée le 13 octobre 2026 dans l'existant, est conservée. Les apprentissages spécialisés sont dans SQLite privé pendant 90 jours ; les cas non résolus restent jusqu'à correction/effacement. Le propriétaire doit confirmer cette exception à la revue finale. Le fournisseur de modèle ne bascule jamais vers une API payante. Le coût et la limite de l'abonnement doivent être contrôlés avant l'activation.
 
-### Apprentissage local
+## État des preuves
 
-La mémoire générale Hermes est volontairement désactivée dans
-`config/planner.config.yaml` : elle pourrait conserver des informations de
-conversation inutiles au classement et élargir les métadonnées exposées au
-planificateur. Père Blaise utilise à la place une mémoire locale, dédiée et
-séparée par runtime : nom d’origine, extension, taille, dossier final et date
-de correction. Les exemples expirent au bout de 90 jours. `apprentissages`
-permet de les consulter ; l’expiration est automatique. Pour corriger ou
-supprimer un apprentissage avant terme, le propriétaire arrête le service puis
-supprime l’exemple concerné de la base SQLite privée selon le runbook P1 à
-venir. Aucun secret, contenu de document ou donnée conversationnelle n’est
-mémorisé.
+`python3 -m unittest discover -s pere-blaise/tests -v` : 36 tests locaux passés le 14 octobre 2026. `docker compose config --quiet` : passé avec chemins temporaires. Une composition Docker entièrement isolée a démarré avec Hermes et broker `healthy`, deux volumes natifs de test et trois montages métier sous `/tmp` ; un mouvement réel et son backup ont été vérifiés dans le broker UID 10000. Hermes n'avait pas de montage Downloads/Documents ; `/v1/toolsets` a renvoyé zéro toolset activé et un appel sans clé a reçu 401. Les volumes/conteneurs de test ont été retirés. Aucun bot, app ou vrai fichier personnel n'a été utilisé dans ces tests.
 
-Le processus hôte Telegram est déterministe. Il accepte seulement un chat privé
-et les identifiants Telegram autorisés. Les commandes privilégiées sont
-syntaxiquement strictes ; il n'exécute jamais une commande reçue de Telegram.
+## Activation et exploitation
 
-Le broker local conserve un plan lié à son propriétaire, valable au plus douze
-heures et consommable une seule fois. Lors d'un `range`, il ne transmet que
-l'identifiant du plan à l'exécuteur. L'exécuteur vérifie les chemins, les liens
-symboliques, l'identité et le SHA-256 du fichier, copie vers `Documents`,
-vérifie la copie puis déplace l'original vers `~/Hermes-Quarantine`. Il ne
-supprime jamais définitivement un fichier. Les fichiers et dossiers cachés sont
-hors périmètre.
-
-`range` reste strictement limité à `Downloads → Documents`. Les recommandations
-sur la hiérarchie de `Documents` ne déplacent, ne renomment et ne suppriment
-jamais un document.
-
-## Arborescence versionnée
-
-- `src/` : broker Unix, registre SQLite, scanner, flux de planification et
-  relais Telegram et Slack ;
-- `scripts/` : exécuteur et générateur des LaunchAgents ;
-- `prompts/` : contrat envoyé au planificateur ;
-- `contracts/` : schéma du manifeste ;
-- `config/` : exemples de configuration non sensibles ;
-- `infra/docker/` : composition du planificateur Docker et son guide ;
-- `tests/` : tests sans accès aux vrais documents.
-
-Les fichiers privés suivants restent hors du dépôt, sous
-`~/Library/Application Support/HermesAgents/runtime/pere-blaise/`, avec permissions `0700`
-pour le dossier et `0600` pour les fichiers : `broker.json`, `planner.env`,
-`planner-auth.json`, `telegram.env`, `slack.env`, la base SQLite, le socket et
-l'offset Telegram. La quarantaine est également hors du dépôt et n'est jamais purgée
-automatiquement.
-
-## Reconstruction après incident
-
-Le runtime précédent a été volontairement détruit après un déploiement hors
-périmètre. Il ne doit jamais être restauré ni référencé. Toute reconstruction
-utilise uniquement la source `~/workspace/my-hermes/pere-blaise`, une racine de
-déploiement explicitement approuvée et le slug `pere-blaise`.
-
-## Installation depuis zéro
-
-Les commandes ci-dessous installent une copie d'exécution distincte, afin que
-le dépôt reste propre :
-
-La racine approuvée est
-`~/Library/Application Support/HermesAgents/deployments`. Le déploiement a
-trois phases explicites : aperçu sans copie, staging testé, puis activation par
-renommage atomique. Les commandes exactes et le volume annoncé doivent être
-relus avant la phase suivante ; le script refuse toute autre racine, lien,
-destination existante ou suppression.
-
-Ensuite :
-
-1. Créer un environnement virtuel dans `DEPLOY/.venv`, puis créer
-   `broker.json` à partir de `config/broker.example.json` dans le runtime privé
-   `~/Library/Application Support/HermesAgents/runtime/pere-blaise/`, en
-   remplaçant les chemins, l'identifiant Telegram et l'exécuteur par ceux de
-   `DEPLOY`.
-2. Créer `planner.env`, `planner-auth.json`, `telegram.env` et, pour Slack,
-   `slack.env` dans ce même
-   répertoire privé ; ne jamais les copier dans le dépôt. Les exemples Docker
-   figurent dans `infra/docker/`.
-3. Démarrer le planificateur Docker avec
-   `infra/docker/docker-compose.planner.yml`, en gardant les accès aux
-   bibliothèques absents du conteneur.
-4. Générer les plist, les vérifier puis les installer avec `launchctl` :
-
-```sh
-python scripts/render-launchd-plists.py \
-  --project "$DEPLOY" --control-dir "$CONTROL" \
-  --output-dir "$CONTROL/launchd-preview"
-plutil -lint "$CONTROL/launchd-preview"/*.plist
-```
-
-Le générateur lance l'interpréteur de l'environnement virtuel directement,
-afin que les dépendances déclarées (dont Socket Mode) soient disponibles. C'est
-ce binaire auquel macOS doit recevoir l'autorisation « Accès complet au disque »
-pour que les services `launchd` lisent `Downloads` et `Documents`.
-
-## Exploitation
-
-Les services installés sont :
-
-| Service | Rôle |
-| --- | --- |
-| `com.local.pere-blaise` | broker local et exécuteur limité |
-| `com.local.pere-blaise-telegram` | relais Telegram déterministe |
-| `com.local.pere-blaise-slack` | relais Slack Socket Mode déterministe (si `slack.env` existe) |
-| `com.local.pere-blaise-weekly-analysis` | analyse non destructive, dimanche 18 h — installée en pause au premier lancement |
-
-Le projet, le conteneur et le volume Docker portent explicitement le nom
-`hermes-pere-blaise`.
-
-Les nouveaux plans reçoivent un identifiant de deux mots français, par exemple
-`azuré-héron`. Les accents sont acceptés ; `detail` est aussi accepté à la place
-de `détail` pour éviter d'imposer un clavier accentué. Les anciens identifiants
-`P-…` restent valides jusqu'à leur expiration.
-
-Après toute mise à jour, reprendre les trois phases de déploiement sans jamais
-écraser la version active, exécuter les tests, regénérer les plist puis
-redémarrer les deux services continus. L'analyse hebdomadaire reste en pause
-jusqu’à une validation humaine séparée.
-
-## Vérification locale
-
-```sh
-python3 -m unittest discover -s tests -v
-```
-
-Les tests sont sans dépendance externe et ne touchent ni les bibliothèques
-personnelles, ni Telegram, ni Docker.
+Lire [docs/runbook.md](docs/runbook.md), [docs/policy.md](docs/policy.md), [docs/access-matrix.md](docs/access-matrix.md) et [TRACEABILITY.md](TRACEABILITY.md). La tâche du dimanche 17 h `Europe/Paris` est désactivée par défaut. Son déclenchement manuel de test puis l'accord de l'exploitant sont nécessaires pour la mettre en service. Les backups de documents ne sont jamais purgés automatiquement.

@@ -1,15 +1,11 @@
 # Politique opérationnelle — Père Blaise
 
-## Décision
+**Autonome :** inventorier les seuls fichiers réguliers visibles de `Downloads`, proposer un plan, rechercher par nom sous `Documents`, rapprocher localement un fichier suivi dans `a_trier`, notifier une analyse hebdomadaire une fois activée. Aucune de ces opérations ne déplace de fichier. La première interaction doit proposer : « Je peux retenir les préférences et décisions durables de cet agent/projet ; confirmez ce que je dois conserver. » Ici seules les corrections locales confirmées sont conservées ; aucune mémoire libre Hermes n'est activée.
 
-Actions autonomes : inventaire de métadonnées, proposition, suivi local de `a_trier`, expiration des exemples et analyse hebdomadaire non destructive.
+**Validé par une commande de l'auteur :** `range <ID>` est l'accord final pour le plan exact de 30 minutes. `envoie` est l'accord explicite pour envoyer un fichier par l'API du canal d'origine ; plusieurs résultats exigent un choix non ambigu. Le propriétaire seul, hors ligne, peut corriger ou supprimer un apprentissage.
 
-Action soumise à validation : seul `range <id>` applique un plan, une fois, dans les douze heures.
+**Interdit :** lire le contenu par le modèle, lui fournir hash ou nom de document déjà classé, déplacer sans `range`, modifier/supprimer un document préexistant, créer un dossier autre que `a_trier`, écraser une cible, envoyer à un autre canal ou DM Slack, partager runtime/secrets entre agents, purger automatiquement les backups. Les fichiers cachés, symlinks et objets non réguliers sont exclus ; un inventaire inaccessible ou trop grand échoue en bloc.
 
-Interdits : sortir de `Downloads`/`Documents`, lire un contenu de document (hors empreinte locale), modifier `Documents` hors plan, supprimer définitivement, utiliser un canal ou un utilisateur hors allowlist.
+**Incident :** la transaction conserve ses backups et son journal. Un échec entraîne rollback limité aux artefacts du plan ; si une édition concurrente empêche un retour sûr, état `BLOCKED_RECOVERY`, arrêt des nouveaux `range`, intervention de l'exploitant. Un timeout d'API de livraison est incertain et ne doit pas déclencher de répétition automatique. Les rétentions par défaut sont 30 jours pour plans/journaux techniques, 90 jours pour apprentissages et événements ; backups sans purge. L'application des durées n'est pas automatisée pour tous les journaux : à vérifier en revue d'exploitation.
 
-Succès : un plan valide est proposé ou appliqué avec copie vérifiée et original en quarantaine. Échec : le service renvoie un code non sensible et ne déplace rien. Blocage/escalade : absence de téléchargement, plan expiré, authentification, quota ou indisponibilité du planificateur : arrêter au plan proposé et prévenir le propriétaire via le canal demandeur.
-
-## Exception planificateur HTTP
-
-Cette exception ne prescrit **pas** une clé API OpenAI. Le planificateur est Hermes, local sur `127.0.0.1:8643`, authentifié par l’abonnement ChatGPT/Codex via OAuth dans son `auth.json` privé. Le fournisseur choisi est `openai-codex` et le modèle par défaut est `gpt-5.4` ; le catalogue réel du compte reste l’autorité. La clé privée `PERE_BLAISE_API_KEY` protège uniquement l’API locale entre le relais et le conteneur. Le coût est inclus dans l’abonnement Codex, sous réserve de ses limites d’usage. Sans quota ou si le service est indisponible, l’analyse échoue sans plan ni déplacement et aucun repli automatique n’est autorisé. Revue : 13 janvier 2027.
+Le modèle `openai-codex` utilise OAuth propre au volume Hermes. Aucun repli API ou fournisseur. L'exception de mémoire libre désactivée du 13 octobre 2026 doit être reconfirmée à la revue finale.

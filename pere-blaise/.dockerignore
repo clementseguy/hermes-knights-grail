@@ -1,0 +1,11 @@
+**
+!pyproject.toml
+!src/
+!src/**
+!prompts/
+!prompts/**
+!scripts/
+!scripts/learning-admin.py
+!scripts/state-backup.py
+**/__pycache__/
+**/*.pyc

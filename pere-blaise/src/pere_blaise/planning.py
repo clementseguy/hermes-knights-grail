@@ -1,93 +1,73 @@
-"""Private-inventory to untrusted-planner boundary."""
+"""Minimal data boundary and strict validation of untrusted planner output."""
 from __future__ import annotations
 
-import re
 import unicodedata
 from pathlib import Path
 from typing import Any
 
 from .contracts import safe_relative
 
-CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
-
-def _display(value: str) -> str:
-    """Keep hostile filenames as data and prevent prompt/layout control characters."""
-    value = CONTROL.sub("�", value)
-    return "".join("�" if unicodedata.category(char).startswith("C") else char for char in value)[:240]
-
-
-def _hierarchy_summary(documents: dict[str, Any], *, max_directories: int) -> list[dict[str, Any]]:
-    direct_counts: dict[str, int] = {}
-    for item in documents["files"]:
-        parent = str(Path(item["path"]).parent)
-        direct_counts[parent] = direct_counts.get(parent, 0) + 1
-    directories = documents.get("directories") or sorted({str(Path(item["path"]).parent) for item in documents["files"]
-                                                          if Path(item["path"]).parent != Path(".")})
-    summary = []
-    for directory in directories[:max_directories]:
-        descendants = sum(1 for other in directories if other == directory or other.startswith(directory + "/"))
-        summary.append({"path": _display(directory), "direct_file_count": direct_counts.get(directory, 0),
-                        "subdirectory_count": descendants - 1})
-    return summary
+def _key(value: str) -> str:
+    return unicodedata.normalize('NFD', value).casefold()
 
 
 def planner_context(inventory: dict[str, Any], *, learning_hints: list[dict[str, Any]] | None = None,
                     max_directories: int = 500) -> dict[str, Any]:
-    """No SHA values, document filenames or full document inventory crosses this boundary."""
-    downloads = [{"source": _display(item["path"]), "size": item["size"], "extension": item["extension"]}
-                 for item in inventory["downloads"]["files"]]
-    document_root = Path(inventory["documents"]["root"])
-    directories = inventory["documents"].get("directories") or sorted({str(Path(item["path"]).parent)
-        for item in inventory["documents"]["files"] if Path(item["path"]).parent != Path(".")})
-    return {"untrusted_downloads": downloads,
-            "document_directories": [_display(directory) for directory in directories[:max_directories]],
-            "document_file_count": len(inventory["documents"]["files"]),
-            "directory_list_truncated": len(directories) > max_directories,
-            "document_hierarchy": _hierarchy_summary(inventory["documents"], max_directories=max_directories),
-            "learning_hints": learning_hints or []}
+    downloads = inventory['downloads']['files']
+    directories = inventory['documents']['directories']
+    if len(directories) > max_directories:
+        raise ValueError('directory inventory limit exceeded')
+    return {'untrusted_downloads': [{'source_relative': unicodedata.normalize('NFC', item['path']), 'size': item['size'], 'extension': item['extension']}
+                                    for item in downloads], 'document_directories': [unicodedata.normalize('NFC', path) for path in directories],
+            'learning_hints': learning_hints or []}
 
 
-def organisation_review_from_proposal(proposal: Any) -> list[dict[str, Any]]:
-    """Accept only short, display-safe, non-operative organisation suggestions."""
-    if not isinstance(proposal, dict) or not isinstance(proposal.get("organization_review", []), list):
-        return []
-    review = []
-    for item in proposal.get("organization_review", [])[:3]:
-        if not isinstance(item, dict):
-            continue
-        title, recommendation = item.get("title"), item.get("recommendation")
-        if not isinstance(title, str) or not isinstance(recommendation, str):
-            continue
-        title, recommendation = _display(title).strip(), _display(recommendation).strip()
-        if title and recommendation:
-            review.append({"title": title, "recommendation": recommendation})
-    return review
-
-
-def manifest_from_proposal(proposal: Any, inventory: dict[str, Any]) -> dict[str, Any]:
-    """Join model-selected source/destination pairs to private scanner fingerprints."""
-    if not isinstance(proposal, dict):
-        raise ValueError("proposal is not an object")
-    if "actions" not in proposal:
-        raise ValueError("proposal is missing actions")
-    if not isinstance(proposal["actions"], list):
-        raise ValueError("proposal actions is not a list")
-    # The LLM sometimes adds explanatory fields despite the prompt.  They are
-    # deliberately discarded here: only source/destination can reach the
-    # reconstructed strict v2 manifest, and both are still independently
-    # validated against the host-private inventory below.
-    available = {item["path"]: item["expected"] for item in inventory["downloads"]["files"]}
-    actions, destinations = [], set()
-    for index, raw in enumerate(proposal["actions"], 1):
-        if not isinstance(raw, dict) or not {"source", "destination"}.issubset(raw):
-            raise ValueError(f"proposal action {index} must contain source and destination")
-        source = str(safe_relative(raw["source"], "source"))
-        destination = str(safe_relative(raw["destination"], "destination"))
-        if source not in available or destination in destinations:
-            raise ValueError("proposal contains unknown source or duplicate destination")
-        destinations.add(destination)
-        actions.append({"source": source, "destination": destination, "expected": available[source]})
-    if not actions:
-        raise ValueError("proposal actions is empty")
-    return {"version": 2, "actions": actions}
+def manifest_from_proposal(proposal: Any, inventory: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if not isinstance(proposal, dict) or not isinstance(proposal.get('actions'), list):
+        raise ValueError('invalid proposal')
+    available = {_key(item['path']): item for item in inventory['downloads']['files']}
+    if len(available) != len(inventory['downloads']['files']):
+        raise ValueError('ambiguous normalized download names')
+    directories = {_key(path): path for path in inventory['documents']['directories']}
+    if len(directories) != len(inventory['documents']['directories']):
+        raise ValueError('ambiguous normalized directory names')
+    directories.setdefault(_key('a_trier'), 'a_trier')
+    directories[_key('.')] = '.'
+    occupied = {_key(item['path']) for item in inventory['documents']['files']}
+    actions = []
+    details = []
+    seen = set()
+    sources = set()
+    for raw in proposal['actions']:
+        if not isinstance(raw, dict) or set(raw) != {'source_relative', 'destination_relative', 'reason', 'certainty'}:
+            raise ValueError('invalid action shape')
+        proposed_source = str(safe_relative(raw['source_relative'], 'source'))
+        proposed_destination = str(safe_relative(raw['destination_relative'], 'destination'))
+        selected = available.get(_key(proposed_source))
+        if selected is None:
+            raise ValueError('unknown source')
+        source = selected['path']
+        reason = raw['reason']
+        certainty = raw['certainty']
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 300 or any(ord(c) < 32 for c in reason):
+            raise ValueError('invalid reason')
+        if certainty not in ('clear', 'uncertain', 'opaque'):
+            raise ValueError('invalid certainty')
+        if source in sources or _key(Path(source).name) != _key(Path(proposed_destination).name):
+            raise ValueError('unknown, repeated or renamed source')
+        proposed_parent = str(Path(proposed_destination).parent)
+        parent = directories.get(_key(proposed_parent))
+        if parent is None or (parent == 'a_trier' and len(Path(proposed_destination).parts) != 2):
+            raise ValueError('destination directory absent')
+        destination = str(Path(parent) / Path(source).name)
+        key = _key(destination)
+        if key in occupied or key in seen:
+            raise ValueError('destination collision')
+        sources.add(source)
+        seen.add(key)
+        actions.append({'source': source, 'destination': destination, 'expected': selected['expected']})
+        details.append({'source': source, 'destination': destination, 'reason': reason.strip(), 'certainty': certainty})
+    if sources != {item['path'] for item in inventory['downloads']['files']}:
+        raise ValueError('proposal must cover every download')
+    return {'version': 2, 'actions': actions}, details
