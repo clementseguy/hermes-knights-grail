@@ -63,7 +63,7 @@ d'archive) :
 1. Résoudre et afficher les chemins physiques de source et de destination.
 2. Refuser une source égale à `/`, `$HOME`, `/Users`, `/System`, `/Library`,
    `/Applications`, `/Volumes`, ou à l'un de leurs ancêtres.
-3. Vérifier que la source est sous `~/workspace/my-hermes/<slug>`, porte le
+3. Vérifier que la source est sous `~/workspace/hermes-knights-grail/<slug>`, porte le
    slug attendu et contient les fichiers de projet attendus.
 4. Vérifier que la destination est sous le répertoire de déploiement autorisé
    et porte exactement le même slug. Une destination active n'est jamais

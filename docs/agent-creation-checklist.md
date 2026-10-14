@@ -31,7 +31,7 @@ différents de [la convention](../AGENTS.md) sont consignés comme exceptions.
 - [ ] Le runtime, les secrets, les journaux et les livrables non versionnés
   sont ignorés par Git ; aucun secret ou état d'exécution n'est versionné.
 - [ ] Le chemin physique de la source est sous
-  `~/workspace/my-hermes/<slug>` et contient les fichiers attendus du projet ;
+  `~/workspace/hermes-knights-grail/<slug>` et contient les fichiers attendus du projet ;
   il n'est ni une racine de volume, ni `$HOME`, ni un répertoire système ou
   l'un de leurs ancêtres.
 - [ ] Le répertoire de déploiement est sous l'emplacement autorisé, porte le
