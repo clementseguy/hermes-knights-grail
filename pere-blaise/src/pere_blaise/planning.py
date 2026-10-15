@@ -22,7 +22,8 @@ def planner_context(inventory: dict[str, Any], *, max_directories: int = 500) ->
             }
 
 
-def manifest_from_proposal(proposal: Any, inventory: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def manifest_from_proposal(proposal: Any, inventory: dict[str, Any], *,
+                           collision_fallback: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not isinstance(proposal, dict) or not isinstance(proposal.get('actions'), list):
         raise ValueError('invalid proposal')
     available = {_key(item['path']): item for item in inventory['downloads']['files']}
@@ -62,7 +63,19 @@ def manifest_from_proposal(proposal: Any, inventory: dict[str, Any]) -> tuple[di
         destination = str(Path(parent) / Path(source).name)
         key = _key(destination)
         if key in occupied or key in seen:
-            raise ValueError('destination collision')
+            if not collision_fallback:
+                raise ValueError('destination collision')
+            # The planner never sees classified document names. The dedicated
+            # duplicate folder must already exist; this code never creates it.
+            duplicates = directories.get(_key('a_trier/doublons'))
+            if duplicates is None:
+                raise ValueError('duplicate review directory absent')
+            destination = str(Path(duplicates) / Path(source).name)
+            key = _key(destination)
+            if key in occupied or key in seen:
+                raise ValueError('destination collision')
+            reason = 'Doublon repéré par le nom à la destination proposée ; classement à vérifier.'
+            certainty = 'uncertain'
         sources.add(source)
         seen.add(key)
         actions.append({'source': source, 'destination': destination, 'expected': selected['expected']})

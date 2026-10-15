@@ -68,8 +68,18 @@ from pathlib import Path
 private,downloads,documents,backups=map(Path,sys.argv[1:])
 paths={'PB_PLANNER_ENV_FILE':str(private/'planner-api.env'),'PB_HERMES_CONFIG':str(private/'planner.config.yaml'),
        'PB_DOWNLOADS':str(downloads),'PB_DOCUMENTS':str(documents),'PB_BACKUPS':str(backups),'PB_PRIVATE_DIR':str(private)}
-(private/'paths.env').write_text(''.join(k+'='+json.dumps(v)+'\n' for k,v in paths.items()))
-(private/'paths.env').chmod(0o600)
+target=private/'paths.env'
+new=''.join(k+'='+json.dumps(v)+'\n' for k,v in paths.items())
+if target.exists():
+    old={}
+    for line in target.read_text().splitlines():
+        key,value=line.split('=',1)
+        old[key]=json.loads(value) if value.startswith('"') else value
+    if old != paths:
+        raise SystemExit('paths.env already selects different roots; change it only during a controlled service stop')
+else:
+    target.write_text(new)
+    target.chmod(0o600)
 print('Created private placeholders; fill IDs, allowlists, key and tokens out of Git.')
 PY
     ;;
@@ -79,6 +89,25 @@ PY
     [[ -f "$env_file" ]] || fail "missing private paths file: $env_file"
     compose=(docker compose --project-directory "$project_dir" --env-file "$env_file" -f "$project_dir/compose.yaml")
     if [[ "$command" == start || "$command" == restart ]]; then
+      python3 - "$env_file" <<'PY'
+import json, sys
+from pathlib import Path
+values={}
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if '=' not in line or line.lstrip().startswith('#'):
+        continue
+    key,value=line.split('=',1)
+    values[key]=json.loads(value) if value.startswith('"') else value
+for key in ('PB_DOWNLOADS','PB_DOCUMENTS','PB_BACKUPS'):
+    raw=values.get(key)
+    if not raw:
+        raise SystemExit(f'missing {key} in paths.env')
+    path=Path(raw).resolve(strict=False)
+    if path == Path('/private/tmp') or Path('/private/tmp') in path.parents or path == Path('/tmp') or Path('/tmp') in path.parents:
+        raise SystemExit(f'{key} points to a temporary test root; production start refused')
+    if not path.is_dir() or Path(raw).is_symlink() or path == Path.home() or path in Path.home().parents:
+        raise SystemExit(f'unsafe {key} root')
+PY
       for f in broker.json telegram.token slack-bot.token slack-app.token planner.env planner-api.env; do
         [[ -s "$private_root/$f" && ! -L "$private_root/$f" ]] || fail "missing/empty private file: $f"
       done

@@ -42,6 +42,19 @@ class ContractTests(unittest.TestCase):
     def source(self, name='facture.txt', data=b'data'):
         p = self.d / name; p.write_bytes(data); return p
 
+    def test_lifecycle_refuses_temporary_production_mounts(self):
+        fake_home = self.root / 'home'; fake_home.mkdir()
+        private = fake_home / 'Library/Application Support/HermesAgents/runtime/pere-blaise'
+        private.mkdir(parents=True)
+        (private / 'paths.env').write_text('PB_DOWNLOADS="/private/tmp/pb-fixture/Downloads"\n'
+                                                 'PB_DOCUMENTS="/private/tmp/pb-fixture/Documents"\n'
+                                                 'PB_BACKUPS="/private/tmp/pb-fixture/Backups"\n')
+        script = Path(__file__).resolve().parents[1] / 'scripts/lifecycle.sh'
+        result = subprocess.run(['bash', str(script), 'start'], env={**os.environ, 'HOME': str(fake_home)},
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('temporary test root', result.stderr)
+
     def planner(self, context):
         return {'actions': [{'source_relative': x['source_relative'], 'destination_relative': 'Factures/' + x['source_relative'],
                              'reason': 'Le nom indique une facture', 'certainty': 'clear'} for x in context['untrusted_downloads']]}
@@ -396,10 +409,13 @@ class ContractTests(unittest.TestCase):
         plan = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
         self.assertEqual(plan['details']['confidence'], 'Low')
 
-    def test_casefold_collision_and_no_unknown_source(self):
+    def test_casefold_collision_uses_review_destination(self):
         self.source('A.txt')
         (self.o / 'Factures' / 'a.TXT').write_text('existing')
-        with self.assertRaises(ValueError): analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        (self.o / 'a_trier' / 'doublons').mkdir(parents=True)
+        plan = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        self.assertEqual(plan['manifest']['actions'][0]['destination'], 'a_trier/doublons/A.txt')
+        self.assertEqual(plan['details']['a_trier_count'], 1)
         self.assertTrue((self.d / 'A.txt').exists())
 
     def test_unicode_normalization_preserves_real_disk_name(self):
@@ -425,6 +441,72 @@ class ContractTests(unittest.TestCase):
         self.source('small.txt', b'a'); self.source('large.txt', b'large')
         with self.assertRaises(ValueError): analyse('telegram:1', self.root, self.broker, self.planner, 1)
         self.assertFalse(any(self.b.iterdir()))
+
+    def test_document_library_is_not_subject_to_download_file_limits(self):
+        self.source('facture.txt', b'a')
+        existing = self.o / 'Factures' / 'ancien.txt'
+        existing.write_bytes(b'private document content')
+        (self.o / 'Factures' / 'autre.txt').write_bytes(b'more private content')
+        broker = Broker(self.store, runtime_dir=self.s, downloads=self.d, documents=self.o,
+                        backups=self.b, max_files=1)
+        seen = []
+        plan = analyse('telegram:1', self.root, broker,
+                       lambda context: (seen.append(json.dumps(context)) or self.planner(context)), 1)
+        self.assertEqual(len(plan['manifest']['actions']), 1)
+        self.assertNotIn('ancien', seen[0])
+        self.assertNotIn('private document content', seen[0])
+        self.assertEqual(broker.apply('telegram:1', plan['id'])['state'], 'APPLIED')
+        self.assertEqual(existing.read_bytes(), b'private document content')
+
+    def test_document_collision_still_detected_beyond_download_file_limits(self):
+        self.source('facture.txt', b'a')
+        (self.o / 'Factures' / 'unrelated.txt').write_bytes(b'oversized')
+        existing = self.o / 'Factures' / 'FACTURE.TXT'
+        existing.write_bytes(b'keep')
+        (self.o / 'a_trier' / 'doublons').mkdir(parents=True)
+        broker = Broker(self.store, runtime_dir=self.s, downloads=self.d, documents=self.o,
+                        backups=self.b, max_files=1)
+        plan = analyse('telegram:1', self.root, broker, self.planner, 1)
+        self.assertEqual(plan['manifest']['actions'][0]['destination'], 'a_trier/doublons/facture.txt')
+        self.assertEqual(existing.read_bytes(), b'keep')
+        self.assertTrue((self.d / 'facture.txt').exists())
+
+    def test_analysis_redirects_occupied_destination_to_review(self):
+        source = self.source('facture.txt', b'new')
+        existing = self.o / 'Factures' / 'FACTURE.TXT'
+        existing.write_bytes(b'keep')
+        (self.o / 'a_trier' / 'doublons').mkdir(parents=True)
+        plan = analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        self.assertEqual(plan['manifest']['actions'][0]['destination'], 'a_trier/doublons/facture.txt')
+        self.assertEqual(plan['details']['confidence'], 'Low')
+        self.assertEqual(plan['details']['a_trier_count'], 1)
+        self.assertIn('Doublon repéré', plan['details']['actions'][0]['reason'])
+        self.assertEqual(source.read_bytes(), b'new')
+        self.assertEqual(existing.read_bytes(), b'keep')
+        self.assertEqual(self.broker.apply('telegram:1', plan['id'])['state'], 'APPLIED')
+        self.assertEqual(existing.read_bytes(), b'keep')
+        self.assertEqual((self.o / 'a_trier' / 'doublons' / 'facture.txt').read_bytes(), b'new')
+
+    def test_analysis_refuses_when_review_destination_is_occupied(self):
+        source = self.source('facture.txt', b'new')
+        existing = self.o / 'Factures' / 'facture.txt'; existing.write_bytes(b'keep')
+        review = self.o / 'a_trier'; review.mkdir()
+        duplicates = review / 'doublons'; duplicates.mkdir()
+        occupied = duplicates / 'FACTURE.TXT'; occupied.write_bytes(b'other')
+        with self.assertRaisesRegex(ValueError, 'destination collision'):
+            analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        self.assertEqual(source.read_bytes(), b'new')
+        self.assertEqual(existing.read_bytes(), b'keep')
+        self.assertEqual(occupied.read_bytes(), b'other')
+
+    def test_analysis_never_creates_duplicate_directory(self):
+        source = self.source('facture.txt', b'new')
+        existing = self.o / 'Factures' / 'facture.txt'; existing.write_bytes(b'keep')
+        with self.assertRaisesRegex(ValueError, 'duplicate review directory absent'):
+            analyse('telegram:1', self.root, self.broker, self.planner, 1000)
+        self.assertFalse((self.o / 'a_trier' / 'doublons').exists())
+        self.assertEqual(source.read_bytes(), b'new')
+        self.assertEqual(existing.read_bytes(), b'keep')
 
     def test_backup_space_refusal_precedes_first_movement(self):
         from unittest.mock import patch

@@ -1,20 +1,20 @@
-# Traçabilité F-001…F-018 — vérification du 14 octobre 2026
+# Traçabilité F-001…F-018 — vérification des 14 et 15 octobre 2026
 
-« Local » signifie tests sur arbres temporaires, « Docker jetable » une composition avec fausses identités et secrets sous `/private/tmp`. Une autre composition d'essai a utilisé les vrais canaux mais uniquement des dossiers fictifs sous `/private/tmp` ; ses résultats ne valent pas validation des dossiers personnels. Un ancien conteneur Hermes réel découvert actif a été arrêté sans supprimer son volume. Après staging et recette sur données fictives, la nouvelle copie a été activée et les deux services réels sont healthy ; aucun essai sur documents personnels n'a été fait. La tâche est activée après validation finale explicite de Clément, sans exécution due ce mercredi.
+« Local » signifie tests sur arbres temporaires, « Docker jetable » une composition avec fausses identités et secrets sous `/private/tmp`. Une autre composition d'essai a utilisé les vrais canaux mais uniquement des dossiers fictifs sous `/private/tmp` ; ses résultats ne valent pas validation des dossiers personnels. Un ancien conteneur Hermes réel découvert actif a été arrêté sans supprimer son volume. Après staging et recette sur données fictives, la nouvelle copie a été activée. Clément a ensuite exercé lui-même `envoie` sur un document personnel ; le développement n'a ouvert ni classé de document personnel. La tâche est activée après validation finale explicite de Clément ; sa première exécution automatique reste à observer. **Correction de traçabilité du 15 octobre :** l'état `healthy` ne prouve pas les racines montées. L'inspection du broker actif a révélé des montages fictifs alors que les notes précédentes parlaient de service réel ; les résultats `PB-DL-EMPTY` obtenus dans cet état ne prouvaient rien sur les Downloads personnels.
 
 | ID | Code / preuve | État exact |
 | --- | --- | --- |
 | F-001 | `telegram_gateway.py`, `slack_gateway.py`, tests de refus Slack et propriétaire | Local passé ; Clément autorisé a obtenu un plan par Telegram privé et par mention humaine dans Slack privé ; un `1` humain sans mention dans le fil Slack est resté muet ; dans le broker Docker avec clients factices, ID Telegram inconnu, groupe, canal et utilisateur Slack inconnus restent muets ; essai depuis un vrai compte tiers non fait |
-| F-002 | `scanner.py`, `workflow.py`, `test_analysis_minimizes_data_and_does_not_move` | Local passé ; analyse complète réelle via les deux canaux sur un fichier fictif et modèle Codex réussie ; plans enregistrés, source intacte et cible absente |
+| F-002 | `scanner.py`, `workflow.py`, tests de minimisation et bibliothèque Documents au-delà des limites Downloads | Local passé sur données fictives ; analyse complète via les deux canaux sur un fichier fictif et modèle Codex réussie. L'incident `PB-PLAN-INVALID` `901ac3f311ba` a motivé le correctif des limites Documents, testé localement et déployé le 15 octobre. `PB-DL-EMPTY` `b436770f921a` ne prouve pas l'état des vrais Downloads ; lors des incidents plus récents, les montages fictifs ont été vérifiés. Après correction des montages, contrôle en lecture seule : deux fichiers visibles depuis le broker. Aucun nouveau plan personnel complet constaté |
 | F-003 | `broker.py`, `_detail`, tests propriétaire | Détails des plans fictifs `vif-grue` puis `léger-café` reçus par Clément sur Telegram : source, destination, raison, certitude, confiance et expiration ; `vif-grue` a été invalidé avant tout `range` |
 | F-004 | `store.py`, `workflow.py`, tests expiration/invalidation | Local passé ; dans la recette réelle sur fichiers fictifs, les anciens plans dont `vif-grue` ont été invalidés par une nouvelle analyse ; `léger-café` est proposé avec signature d'inventaire courante ; expiration réelle et redémarrage du service final non vérifiés |
 | F-005 | `contracts.py`, `store.py`, tests IDs | Local passé ; collision sous charge non vérifiée |
 | F-006 | `broker.py`, `executor.py`, `test_apply_backups_and_owner` | `range léger-café` demandé une fois par Clément sur Telegram, appliqué sur un fichier fictif seulement après détail ; source absente et cible présente après redémarrage ; aucune autre commande n'a provoqué de mouvement |
 | F-007 | `executor.py`, tests backup/espace | Backup fictif vérifié présent avant déplacement selon le journal ; après application, backup et cible ont taille/empreinte identiques à la source initiale, manifeste marqué vérifié et conservé ; sous broker Docker UID 10000, manque d'espace injecté dans un tmpfs fictif : refus avant journal, backup ou mouvement |
 | F-008 | `executor.py`, reprise/rollback/blocage et arrêt brutal de processus testés | Local passé ; coupure électrique réelle exclue par décision du propriétaire, voir README ; rollback inchangé |
-| F-009 | `planning.py`, `executor.py`, collision Docker jetable | Cible existante refusée avant mouvement dans l'essai antérieur ; après `range` réel sur arbre fictif, les deux documents fictifs préexistants gardent taille et empreinte identiques ; documents personnels jamais essayés |
+| F-009 | `planning.py`, `executor.py`, collision Docker jetable et tests au-delà des limites Downloads | Cible existante refusée avant mouvement dans l'essai antérieur ; après `range` réel sur arbre fictif, les deux documents fictifs préexistants gardent taille et empreinte identiques. Le traitement local choisit le dossier existant `a_trier/doublons` si la cible proposée est occupée, et refuse si le dossier manque ou si ce repli est occupé ; tests avec collision normalisée et conservation du document existant. Aucune tentative de classement personnel |
 | F-010 | `planning.py`, `executor.py`, tests de dossier absent/`a_trier` | Local passé ; `range léger-café` a créé `Documents/a_trier` dans l'arbre fictif et y a déplacé l'unique source à confiance Low, backup conservé |
-| F-011 | `file_delivery.py`, gateways, tests 0/1/N, choix et fil Slack | Local passé ; Telegram : une tentative « introuvable », puis pièce jointe fictive et confirmation reçues par le propriétaire ; Slack : upload réel de 60 octets, puis deux résultats proposés et choix 1 avec mention dans le même fil donnant uniquement le fichier fictif de 70 octets ; limites de taille des plateformes réelles non poussées |
+| F-011 | `file_delivery.py`, gateways, tests 0/1/N, choix et fil Slack | Local passé ; Telegram : une tentative « introuvable », puis pièce jointe fictive et confirmation reçues par le propriétaire ; Slack : upload réel de 60 octets, puis deux résultats proposés et choix 1 avec mention dans le même fil donnant uniquement le fichier fictif de 70 octets. Le 14 octobre, Clément a lui-même sélectionné et reçu un document personnel sur Telegram ; le développement n'en a pas lu les octets. La recherche `envoie facture GCU` était sans correspondance. L'incident `PB-SEND-NOTFOUND` `78fb0d880f35` sur `invoice GPU` provenait des montages fictifs ; après correction, une recherche locale en lecture seule trouve exactement le PDF attendu. Aucun nouvel envoi réel déclenché par ce diagnostic. Limites de taille des plateformes réelles non poussées |
 | F-012 | `planning.py`, tests absence de hash/nom classé, `/v1/toolsets` zéro | Frontière locale et Docker passée : avec deux documents fictifs classés, le contexte construit dans le broker exclut leurs noms et les champs hash/inode/mtime ; l'appel réel au modèle a produit un plan, mais aucune capture réseau de sa requête n'a été faite |
 | F-013 | `store.py`, `workflow.py`, tests non-collecte et conservation | **Reportée par décision du propriétaire ; jamais validée** |
 | F-014 | `router.py`, gateways, outil admin retiré, tests refus | **Reportée par décision du propriétaire ; jamais validée** |
@@ -213,11 +213,129 @@ docker run --read-only --mount hermes-pere-blaise-data:ro ... (lecture seule)
   aucune valeur lue, validité OAuth et modèle non vérifiées
 ```
 
-## Points encore ouverts avant activation
+## Correctif et déploiement du 15 octobre
+
+```text
+docker logs hermes-pere-blaise-broker (sortie filtrée par ID d'incident)
+  901ac3f311ba : PB-PLAN-INVALID, analyse, ValueError ;
+  a74790a03ad9 : PB-SEND-NOTFOUND, send, sans exception
+docker exec hermes-pere-blaise-broker python -c [compteurs de métadonnées]
+  Documents : 7 156 fichiers, 221 dossiers, 2 fichiers > 1 Gio ;
+  Downloads : 4 fichiers ; aucun nom, octet ou hash de document affiché
+docker exec hermes-pere-blaise-broker python -c [comptage de correspondances]
+  0 nom ou chemin contient à la fois « facture » et « gcu » ; aucun envoi lancé
+python3 -m unittest discover -s tests -v (depuis pere-blaise)
+  45 tests OK ; nouveaux tests : grande bibliothèque Documents, absence de fuite
+  vers le modèle, application fictive, collision normalisée et protection source
+deploy-stage-safe.sh --preview puis --stage --confirmed-total-bytes 289506
+  67 fichiers, 289 506 octets sous budget 2 Mio ; staging validé par 45 tests
+docker build -q -f [Dockerfile du staging] [staging]
+  image construite ; essai docker run --rm sans montage : 1 002 Documents fictifs,
+  dont un fichier creux de 2 Gio, inventoriés ; limite Downloads maintenue
+docker compose --project-directory [staging] --env-file [privé] config --quiet
+  OK ; aucun secret affiché
+docker exec hermes-pere-blaise-broker python /app/scripts/state-backup.py backup
+  instantanés cohérents plans et ingress dans le volume privé ; SHA-256 et
+  integrity_check vérifiés ; aucune donnée ni aucun volume supprimé
+lifecycle.sh stop ; deploy-stage-safe.sh --replace-stage [staging]
+  --archive-current [archive] --confirm-services-stopped ; lifecycle.sh start
+  ancien code conservé sous .archive/pere-blaise-20261015-pre-inventory-fix ;
+  Hermes et broker redémarrés healthy sans port publié
+docker inspect [deux conteneurs] ; docker exec [broker] python -c [état filtré]
+  Hermes : /opt/data et config ro seulement ; broker : Downloads, Documents,
+  backups, runtime privé ro et volume /state ; deux SQLite integrity_check ok ;
+  weekly_enabled true. Aucune nouvelle analyse sur données personnelles lancée
+  par le développement.
+mention Slack humaine « analyse » à 6 h 14 après déploiement
+  PB-DL-EMPTY incident b436770f921a ; comptage sans noms, octets ni hashes :
+  zéro fichier régulier visible dans Downloads, aucune erreur d'accès ;
+  aucun plan ni mouvement. Ancienne erreur d'inventaire Documents non répétée.
+```
+
+## Points encore ouverts en exploitation
+
+### Collision de destination du 15 octobre
+
+```text
+docker logs --since 3h hermes-pere-blaise-broker (filtre de l'ID d'incident)
+  a20bcda5460c : PB-PLAN-COLLISION, analyse, ValueError
+docker exec broker : inventaires de métadonnées et clés normalisées uniquement
+  deux fichiers Downloads de noms distincts ; aucun doublon de dossier Documents ;
+  un des deux basenames Downloads occupe déjà une destination sous Documents ;
+  a_trier est libre pour les deux noms ; aucun nom ni contenu affiché
+python3 -m unittest discover -s tests -q
+  48 tests OK ; cible occupée réorientée vers a_trier, document préexistant
+  intact après application fictive, échec maintenu si a_trier est aussi occupé
+deploy-stage-safe.sh --preview puis --stage --confirmed-total-bytes 304862
+  67 fichiers, 304862 octets sous budget 2 Mio ; 48 tests du staging OK
+lifecycle.sh stop ; deploy-stage-safe.sh --replace-stage ; lifecycle.sh start
+  aucun plan applying ; ancien code archivé sous
+  .archive/pere-blaise-20261015-pre-collision-fix ; broker reconstruit ;
+  Hermes et broker healthy avec les trois montages personnels approuvés
+docker exec broker : proposition contrôlée sur l'inventaire réel, sans registre
+  deux sources ; une cible proposée occupée ; deux actions sûres vers a_trier ;
+  aucune destination finale occupée ; aucun nom, hash ou contenu affiché ;
+  aucun plan créé, fichier déplacé ni pièce jointe envoyée
+```
+
+Le modèle ne reçoit pas les noms des documents classés. La réorientation
+locale produit un plan à examiner ; elle ne déplace aucun fichier lors de
+`analyse` et n'autorise toujours qu'un `range` explicite de l'auteur.
+
+Décision ultérieure du propriétaire : utiliser le sous-répertoire existant
+`Documents/a_trier/doublons` pour les conflits de nom. Vérification en lecture
+seule depuis le broker : ce chemin est un répertoire et non un lien symbolique.
+La détection reste fondée sur le nom normalisé, sans comparaison de contenu.
+Les tests couvrent sa présence, son absence, une cible déjà occupée dans ce
+sous-répertoire, le compte `a_trier` et la conservation du fichier préexistant.
+`python3 -m unittest discover -s tests -q` : 49 tests OK sur arbres fictifs.
+Le staging contrôlé de 308058 octets a passé ces 49 tests, puis l'ancien code a
+été archivé sous `.archive/pere-blaise-20261015-pre-duplicates-folder` avant
+redémarrage des deux services `healthy`. Un contrôle du broker en lecture seule
+sur l'inventaire réel, qui comptait alors trois sources, a détecté une cible
+occupée et placé exactement cette action dans `a_trier/doublons` ; toutes les
+destinations finales étaient libres. Aucun plan n'a été enregistré ni appliqué.
+
+### Diagnostic des montages du 15 octobre
+
+```text
+docker inspect hermes-pere-blaise-broker (Mounts et labels Compose uniquement)
+  projet hermes-pere-blaise ; déploiement actif sous deployments/pere-blaise ;
+  fichier d'environnement effectif paths.env ; trois montages métier sous
+  /private/tmp/pb-realchannel.ZNsEDz, malgré l'état healthy
+docker logs --since 2h hermes-pere-blaise-broker (filtre des deux IDs)
+  665ffbff51b1 : PB-DL-EMPTY, analyse, ValueError
+  78fb0d880f35 : PB-SEND-NOTFOUND, send, sans exception
+comptage hôte des entrées visibles, sans lecture d'octets
+  /Users/clement/Downloads : deux fichiers réguliers visibles ; Downloads fictif : zéro
+paths.env privé sauvegardé dans paths.test.env ; chemins réels de paths.real.env
+  transférés atomiquement dans paths.env après contrôle des trois racines approuvées
+validate-private.py ; docker compose config --quiet ; docker compose up -d --no-build --wait broker
+  configuration valide ; broker recréé et healthy ; aucun volume effacé
+docker exec broker : scanner et recherche locale en lecture seule
+  /downloads : deux fichiers réguliers visibles ; /documents : une seule
+  correspondance « invoice GPU », au chemin attendu ; aucun octet ouvert,
+  aucune pièce jointe envoyée, aucun plan créé et aucun range exécuté
+python3 -m unittest discover -s tests -q ; bash -n scripts/lifecycle.sh ; git diff --check
+  46 tests OK ; garde contre les montages temporaires testée ; contrôles OK
+deploy-stage-safe.sh --preview puis --stage --confirmed-total-bytes 299416
+  67 fichiers, 299416 octets sous budget 2 Mio ; 46 tests du staging OK
+lifecycle.sh stop ; deploy-stage-safe.sh --replace-stage ; lifecycle.sh start
+  ancien code archivé sous .archive/pere-blaise-20261015-pre-mount-guard ;
+  staging activé par renommage ; deux services redémarrés healthy ;
+  aucun ancien déploiement ou volume supprimé
+docker exec broker : scan complet Downloads et inventaire Documents, lecture seule
+  deux sources avec empreintes locales calculées, 221 dossiers Documents ;
+  contexte planificateur construit pour deux fichiers ; aucun nom, hash ou
+  contenu affiché ; aucun appel au modèle et aucun plan créé
+docker inspect : montages effectifs après redémarrage
+  /downloads=/Users/clement/Downloads ; /documents=/Users/clement/Documents ;
+  /backups=/Users/clement/Backup-pere-blaise ; broker et Hermes healthy
+```
 
 - Comptes : les trois tokens sont dans le runtime privé 0700, fichiers 0600. L'API Telegram confirme le bot attendu et aucun webhook ; l'ID privé de Clément a été relevé sans affichage et placé dans `broker.json`. Les tokens Slack actifs possèdent `app_mentions:read`, `chat:write`, `files:write` et `connections:write` ; l'hôte WebSocket est sous `.slack.com`. La clé interne est configurée hors dépôt et un appel réel Codex sur texte fictif a réussi. Un message Telegram était encore en attente lors du diagnostic broker arrêté : l'unicité du consommateur reste à établir. Le compte Slack d'Élise reste à créer avant son ajout à l'allowlist. Aucun secret n'a été fourni dans le chat ni journalisé.
 - Modèle : choix du propriétaire `openai-codex` / `gpt-6-luna` / `low` ; l'image épinglée reconnaît le modèle et un appel réel court sur texte fictif a réussi via l'OAuth du volume avant et après redémarrage. Le planificateur complet a produit les plans de la recette sur fichiers fictifs. Le renouvellement ultérieur du jeton et les limites de l'abonnement associé à ce volume restent à vérifier, sans repli payant.
-- macOS : les trois vrais chemins choisis par Clément existent et Docker Desktop peut les monter ; UID 10000 y voit R/W/X dans le conteneur sans qu'aucun document ait été ouvert. Un contrôle de métadonnées ne prouve pas toutes les opérations sur fichiers protégés par macOS ; si une alerte apparaît, accorder seulement les droits Fichiers et dossiers ciblés Downloads/Documents, sans Accès complet au disque par défaut. Aucune autorisation manquante n'a été constatée.
-- E2E sur arbres fictifs avec les vrais canaux : la tâche manuelle a retourné zéro échec API et Clément a reçu ses deux messages sur Telegram et Slack, sans mouvement ; une mention humaine Slack a obtenu accusé et plan complet dans le même fil ; une nouvelle commande Telegram a obtenu accusé et plan complet. Couvrir encore les autres scénarios F-001…F-012 et F-015…F-018, les erreurs de livraison, l'absence de répétition et de mouvement automatique avant validation finale du propriétaire.
+- macOS : les trois vrais chemins choisis par Clément existent et Docker Desktop peut les monter ; UID 10000 y voit R/W/X dans le conteneur. Le développement n'a ouvert aucun document personnel, mais Clément a lui-même utilisé `envoie` sur l'un d'eux. Des compteurs de métadonnées ont servi au diagnostic du 15 octobre ; ils ne prouvent pas toutes les opérations sur fichiers protégés par macOS. Si une alerte apparaît, accorder seulement les droits Fichiers et dossiers ciblés Downloads/Documents, sans Accès complet au disque par défaut. Aucune autorisation manquante n'a été constatée.
+- E2E sur arbres fictifs avec les vrais canaux : la tâche manuelle a retourné zéro échec API et Clément a reçu ses deux messages sur Telegram et Slack, sans mouvement ; une mention humaine Slack a obtenu accusé et plan complet dans le même fil ; une nouvelle commande Telegram a obtenu accusé et plan complet. Clément a aussi reçu une pièce jointe personnelle via Telegram. Les scénarios d'échec et limites non exercés restent listés par exigence dans le tableau ; la validation finale pour l'activation hebdomadaire a déjà été donnée.
 - Exploitation : purge chronologique des journaux techniques non validée ; migration hors ligne 1→2→1 testée localement, mais mise à jour d'image et retour arrière des vrais volumes/OAuth non exercés. Backups de documents conservés sans purge.
-- Déploiement réel : chemins, budget et aperçu de copie relus par Clément ; staging démarré healthy sur données fictives, ancien code archivé sans suppression et service réel healthy avec montages approuvés. Aucun test ou classement des fichiers personnels. La recette manuelle fictive a été reçue sur les deux canaux ; Clément a validé l'activation et le broker est healthy avec weekly_enabled true. Observer le premier dimanche réel avant de dire qu'une exécution automatique est validée.
+- Déploiement réel : chemins, budget et aperçu de copie relus par Clément ; premier staging démarré healthy sur données fictives, ancien code archivé sans suppression. Le correctif du 15 octobre a suivi un second staging, un essai Docker jetable et l'archivage de la version précédente. Services healthy avec montages approuvés, aucun port publié ; `weekly_enabled` reste true. Clément a testé un envoi personnel ; aucun classement personnel n'a été lancé. Sa nouvelle `analyse` a atteint le cas Downloads vide sans l'erreur Documents antérieure ; un plan complet après correctif et le premier dimanche réel restent à observer.

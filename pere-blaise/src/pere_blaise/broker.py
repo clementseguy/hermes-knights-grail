@@ -89,7 +89,8 @@ class Broker:
         snapshot = plan['details'].get('snapshot')
         if snapshot is not None:
             current = {'downloads': scan(self.downloads, hash_files=True, sha256_max_bytes=self.store.sha256_max_bytes, max_files=self.max_files),
-                       'documents': scan(self.documents, hash_files=False, sha256_max_bytes=self.store.sha256_max_bytes, max_files=self.max_files)}
+                       'documents': scan(self.documents, hash_files=False, sha256_max_bytes=self.store.sha256_max_bytes,
+                                         max_files=self.max_files, enforce_file_limits=False)}
             from .workflow import inventory_signature
             if inventory_signature(current) != snapshot:
                 raise ValueError('plan inventory changed')

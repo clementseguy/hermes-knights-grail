@@ -9,7 +9,8 @@ from typing import Any
 from .contracts import fingerprint, safe_relative
 
 
-def scan(root: Path, *, hash_files: bool, sha256_max_bytes: int, max_files: int = 1000) -> dict[str, Any]:
+def scan(root: Path, *, hash_files: bool, sha256_max_bytes: int, max_files: int = 1000,
+         enforce_file_limits: bool = True) -> dict[str, Any]:
     if not root.is_dir() or root.is_symlink():
         raise PermissionError('inventory root unavailable')
     files: list[dict[str, Any]] = []
@@ -41,7 +42,7 @@ def scan(root: Path, *, hash_files: bool, sha256_max_bytes: int, max_files: int 
             if not stat.S_ISREG(info.st_mode) or path.is_symlink():
                 excluded += 1
                 continue
-            if len(files) >= max_files or info.st_size > sha256_max_bytes:
+            if enforce_file_limits and (len(files) >= max_files or info.st_size > sha256_max_bytes):
                 raise ValueError('inventory limit exceeded')
             item = {'path': relative, 'size': info.st_size, 'mtime_ns': info.st_mtime_ns,
                     'extension': path.suffix.lower(), 'device': info.st_dev, 'inode': info.st_ino}
@@ -54,4 +55,5 @@ def scan(root: Path, *, hash_files: bool, sha256_max_bytes: int, max_files: int 
 
 def scan_library(home: Path, sha256_max_bytes: int, max_files: int = 1000) -> dict[str, Any]:
     return {'downloads': scan(home / 'Downloads', hash_files=True, sha256_max_bytes=sha256_max_bytes, max_files=max_files),
-            'documents': scan(home / 'Documents', hash_files=False, sha256_max_bytes=sha256_max_bytes, max_files=max_files)}
+            'documents': scan(home / 'Documents', hash_files=False, sha256_max_bytes=sha256_max_bytes,
+                              max_files=max_files, enforce_file_limits=False)}
