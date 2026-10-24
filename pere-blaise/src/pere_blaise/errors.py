@@ -14,6 +14,8 @@ CATALOG = frozenset({
     'PB-MODEL-UNAVAILABLE', 'PB-SEND-NOTFOUND', 'PB-SEND-AMBIGUOUS',
     'PB-SEND-LIMIT', 'PB-SEND-FAILED', 'PB-SEND-UNCERTAIN',
     'PB-CHANNEL-FAILED', 'PB-LEARNING-DEFERRED',
+    'PB-RECEIVE-FILE', 'PB-RECEIVE-TYPE', 'PB-RECEIVE-LIMIT',
+    'PB-RECEIVE-COLLISION', 'PB-RECEIVE-FAILED',
 })
 
 
@@ -40,6 +42,8 @@ def classify(exc: Exception, *, stage: str = 'command') -> str:
         return 'PB-MODEL-UNAVAILABLE'
     if stage == 'send':
         return 'PB-SEND-FAILED'
+    if stage == 'receive':
+        return 'PB-RECEIVE-FAILED'
     if stage == 'apply':
         return 'PB-APPLY-FAILED'
     return 'PB-PLAN-INVALID'

@@ -5,6 +5,7 @@ import argparse
 import json
 import mimetypes
 import os
+import re
 import stat
 import sys
 import time
@@ -15,12 +16,18 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .file_delivery import search_documents
+from .file_ingress import open_download, safe_filename, save_attachment
 from .hermes_client import planner_request
 from .router import Command, parse_message
 from .workflow import analyse
 from .broker import Broker
 from .ingress_ledger import IngressLedger
 from .store import PlanStore
+
+HELP = ("Commandes : analyse, détaille <ID>, range <ID>, envoie <nom>. "
+        "Pour déposer dans Downloads : écrivez « tiens », puis envoyez un seul document dans ce chat privé. "
+        "Vous pouvez aussi mettre « tiens » dans la légende du document.")
+RECEIVE_WINDOW_SEC = 5 * 60
 
 
 def _env_value(path: Path, key: str) -> str:
@@ -34,6 +41,7 @@ def _env_value(path: Path, key: str) -> str:
 
 class Telegram:
     def __init__(self, token: str) -> None:
+        self.token = token
         self.base = "https://api.telegram.org/bot" + token + "/"
 
     def call(self, method: str, fields: dict[str, Any] | None = None) -> Any:
@@ -74,6 +82,19 @@ class Telegram:
         if not isinstance(payload, dict) or not payload.get("ok"):
             raise ValueError("Telegram refused the document")
 
+    def download(self, file_id: str, declared_size: int):
+        if not isinstance(file_id, str) or not file_id or len(file_id) > 512:
+            raise ValueError('PB-RECEIVE-FAILED')
+        details = self.call('getFile', {'file_id': file_id})
+        if not isinstance(details, dict) or (details.get('file_size') is not None and details['file_size'] != declared_size):
+            raise ValueError('PB-RECEIVE-FAILED')
+        path = details.get('file_path')
+        if (not isinstance(path, str) or not re.fullmatch(r'[A-Za-z0-9_./-]+', path) or
+                path.startswith('/') or any(part in ('.', '..') for part in path.split('/'))):
+            raise ValueError('PB-RECEIVE-FAILED')
+        return open_download('https://api.telegram.org/file/bot' + self.token + '/' + path,
+                             'api.telegram.org')
+
 
 def _user_error(exc: Exception, *, stage: str = 'command') -> str:
     from .errors import classify, user_message
@@ -85,6 +106,9 @@ class Gateway:
         self.config, self.telegram, self.project, self.planner_env = config, telegram, project, planner_env
         self.allowed = set(map(str, config.get('telegram_allowed_user_ids', [])))
         self.pending: dict[tuple[str, str], list[tuple[Path, tuple[int, int, int, int]]]] = {}
+        # A short, process-local intent prevents an unrelated attachment from
+        # becoming a command. It is lost on restart, so no stale grant survives.
+        self.receive_pending_until: dict[str, float] = {}
         self.broker = Broker(PlanStore(Path(config['database']), sha256_max_bytes=int(config['sha256_max_bytes'])),
                              runtime_dir=Path(config['runtime_dir']), downloads=Path(config['downloads']),
                              documents=Path(config['documents']), backups=Path(config['backups']),
@@ -173,7 +197,19 @@ class Gateway:
         if command.name == 'detail': return self._detail(owner, command.argument)
         if command.name == 'range': return self._apply(owner, command.argument)
         if command.name == 'send': return self._send(owner, command.argument, deliver, context)
+        if command.name == 'receive': raise ValueError('PB-RECEIVE-FILE')
         raise ValueError('PB-PLAN-INVALID')
+
+    def receive_file(self, platform: str, sender: str, filename: object, size: object, stream) -> str:
+        authorized = str(self.config.get(platform + '_receive_user_id', ''))
+        allowed = (self.allowed if platform == 'telegram' else
+                   set(map(str, self.config.get('slack_allowed_user_ids', []))))
+        if not authorized or sender != authorized or sender not in allowed:
+            raise PermissionError('receive owner mismatch')
+        limit = int(self.config.get('receive_max_bytes', 10 * 1024 * 1024))
+        with self.broker.operation_lock():
+            name = save_attachment(Path(self.config['downloads']), filename, size, stream, limit)
+        return f'Fichier déposé dans Downloads : {name}'
 
     def handle(self, message: dict[str, Any]) -> None:
         sender = str(message.get('from', {}).get('id', ''))
@@ -182,17 +218,41 @@ class Gateway:
         if self.telegram is None or sender not in self.allowed or chat.get('type') != 'private' or chat_id != sender:
             return
         owner = self.owner('telegram', sender)
-        value = str(message.get('text', '')).strip()
+        attachment = message.get('document')
+        value = str(message.get('caption' if attachment is not None else 'text', '')).strip()
+        receive_owner = sender == str(self.config.get('telegram_receive_user_id', ''))
         try:
-            if value.isdecimal():
+            if attachment is not None:
+                pending_until = self.receive_pending_until.pop(sender, 0)
+                requested = value.casefold() == 'tiens' or (not value and pending_until > time.monotonic())
+                if not receive_owner:
+                    return
+                if not requested:
+                    raise ValueError('PB-RECEIVE-FILE')
+                if not isinstance(attachment, dict):
+                    raise ValueError('PB-RECEIVE-FILE')
+                size, filename = attachment.get('file_size'), attachment.get('file_name')
+                safe_filename(filename)
+                if not isinstance(size, int) or size < 0 or size > int(self.config.get('receive_max_bytes', 10 * 1024 * 1024)):
+                    raise ValueError('PB-RECEIVE-LIMIT')
+                with self.telegram.download(attachment.get('file_id'), size) as stream:
+                    response = self.receive_file('telegram', sender, filename, size, stream)
+            elif value.casefold() == 'tiens':
+                if not receive_owner:
+                    return
+                self.receive_pending_until[sender] = time.monotonic() + RECEIVE_WINDOW_SEC
+                response = 'Réception préparée : envoyez maintenant un seul document dans ce chat privé, sous 5 minutes.'
+            elif value.isdecimal():
+                self.receive_pending_until.pop(sender, None)
                 response = self.select(owner, value, lambda path, content: self.telegram.document(chat_id, path, content), 'telegram:' + chat_id)
             else:
+                self.receive_pending_until.pop(sender, None)
                 command = parse_message(value)
                 if command and command.name in ('analyse', 'range', 'send'):
                     self.telegram.message(chat_id, 'Opération en cours ; résultat à suivre dans ce chat.')
-                response = self.dispatch(command, owner, lambda path, content: self.telegram.document(chat_id, path, content), 'telegram:' + chat_id) if command else 'Commandes : analyse, détaille <ID>, range <ID>, envoie <nom>.'
+                response = self.dispatch(command, owner, lambda path, content: self.telegram.document(chat_id, path, content), 'telegram:' + chat_id) if command else HELP
         except Exception as exc:
-            response = _user_error(exc, stage=command.name if 'command' in locals() and command else 'command')
+            response = _user_error(exc, stage='receive' if value.casefold() == 'tiens' else command.name if 'command' in locals() and command else 'command')
         self.telegram.message(chat_id, response)
 
 

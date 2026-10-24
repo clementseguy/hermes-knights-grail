@@ -18,11 +18,13 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .router import parse_message
+from .file_ingress import open_download, safe_filename
 from .ingress_ledger import IngressLedger
 from .telegram_gateway import Gateway, _env_value, _user_error
 
 
-HELP = "Commandes : analyse · détaille <id> · range <id> · envoie <nom>."
+HELP = ("Commandes : analyse · détaille <id> · range <id> · envoie <nom>. "
+        "Pour déposer dans Downloads : mentionnez-moi, écrivez « tiens » et joignez un seul fichier au même message.")
 
 
 def _csv(value: str) -> set[str]:
@@ -38,7 +40,7 @@ class Slack:
 
     def call(self, method: str, payload: dict[str, Any], *, app_token: bool = False) -> dict[str, Any]:
         token = self.app_token if app_token else self.bot_token
-        if method in ('files.getUploadURLExternal', 'files.completeUploadExternal'):
+        if method in ('files.getUploadURLExternal', 'files.completeUploadExternal', 'files.info'):
             fields = {key: json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value)
                       for key, value in payload.items()}
             body = urlencode(fields).encode('utf-8')
@@ -88,6 +90,19 @@ class Slack:
         self.call('files.completeUploadExternal', {'files': [{'id': file_id, 'title': path.name}],
                                                    'channel_id': channel, 'thread_ts': thread_ts})
 
+    def download(self, file_id: str, sender: str, declared_size: int, filename: str):
+        if not isinstance(file_id, str) or not re.fullmatch(r'F[A-Za-z0-9]+', file_id):
+            raise ValueError('PB-RECEIVE-FAILED')
+        info = self.call('files.info', {'file': file_id}).get('file')
+        if (not isinstance(info, dict) or info.get('id') != file_id or info.get('user') != sender or
+                info.get('name') != filename or info.get('size') != declared_size or
+                info.get('is_external') is not False or info.get('mode') == 'external'):
+            raise ValueError('PB-RECEIVE-FAILED')
+        url = info.get('url_private_download')
+        if not isinstance(url, str):
+            raise ValueError('PB-RECEIVE-FAILED')
+        return open_download(url, 'files.slack.com', {'Authorization': 'Bearer ' + self.bot_token})
+
 
 class SlackGateway:
     def __init__(self, config: dict[str, Any], slack: Slack, project: Path, planner_env: Path, channel: str, users: set[str]) -> None:
@@ -117,24 +132,60 @@ class SlackGateway:
         if not isinstance(payload, dict):
             return
         event = payload.get("event")
-        if not isinstance(event, dict) or event.get("type") != "app_mention":
+        if not isinstance(event, dict):
+            return
+        event_type = event.get('type')
+        if event_type == 'message':
+            if event.get('subtype') not in (None, 'file_share') or not isinstance(event.get('files'), list):
+                return
+        elif event_type != 'app_mention':
             return
         channel, sender, timestamp = event.get("channel"), event.get("user"), event.get("ts")
         if channel != self.channel or not isinstance(sender, str) or sender not in self.users or not isinstance(timestamp, str):
             return
-        text = self._command_text(event.get("text"))
+        raw_text = event.get('text')
+        text = self._command_text(raw_text)
         thread_ts = event.get("thread_ts")
         reply_thread = thread_ts if isinstance(thread_ts, str) else timestamp
         if text is None:
             return
+        bot_user = self.gateway.config.get('slack_bot_user_id')
+        exact_receive = (isinstance(bot_user, str) and bot_user and
+                         isinstance(raw_text, str) and
+                         re.fullmatch(r'<@' + re.escape(bot_user) + r'(?:\|[^>\r\n]{1,80})?>\s+tiens',
+                                      raw_text.strip(), re.IGNORECASE) is not None)
+        if event_type == 'message' and not exact_receive:
+            return
+        if exact_receive and sender != str(self.gateway.config.get('slack_receive_user_id', '')):
+            return
         event_id = payload.get('event_id')
-        if not isinstance(event_id, str) or not event_id or not self.ledger.begin('slack', event_id):
+        has_file = isinstance(event.get('files'), list) and bool(event['files'])
+        ledger_id = 'receive:' + channel + ':' + timestamp if exact_receive and has_file else event_id
+        if not isinstance(ledger_id, str) or not ledger_id or not self.ledger.begin('slack', ledger_id):
+            return
+        if exact_receive:
+            try:
+                files = event.get('files')
+                if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict):
+                    raise ValueError('PB-RECEIVE-FILE')
+                item = files[0]
+                filename, size = item.get('name'), item.get('size')
+                safe_filename(filename)
+                if not isinstance(size, int) or size < 0 or size > int(self.gateway.config.get('receive_max_bytes', 10 * 1024 * 1024)):
+                    raise ValueError('PB-RECEIVE-LIMIT')
+                self.slack.reply(channel, reply_thread, 'Réception du fichier en cours.')
+                with self.slack.download(item.get('id'), sender, size, filename) as stream:
+                    response = self.gateway.receive_file('slack', sender, filename, size, stream)
+            except Exception as exc:
+                response = _user_error(exc, stage='receive')
+            self.slack.reply(channel, reply_thread, response)
+            self.ledger.complete('slack', ledger_id)
             return
         command = parse_message(text)
         owner = self.gateway.owner('slack', sender)
         if command is None and not text.isdecimal():
             self.slack.reply(channel, reply_thread, HELP)
-            self.ledger.complete('slack', event_id)
+            self.ledger.complete('slack', ledger_id)
             return
         try:
             if command and command.name in ('analyse', 'range', 'send'):
@@ -145,7 +196,7 @@ class SlackGateway:
         except Exception as exc:
             response = _user_error(exc, stage=command.name if command else 'command')
         self.slack.reply(channel, reply_thread, response)
-        self.ledger.complete('slack', event_id)
+        self.ledger.complete('slack', ledger_id)
 
 
 def run(gateway: SlackGateway, socket_factory: Any) -> int:

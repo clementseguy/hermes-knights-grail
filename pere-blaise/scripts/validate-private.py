@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -21,6 +22,20 @@ principals = {'telegram:' + str(x) for x in config['telegram_allowed_user_ids']}
 mapping = config.get('identity_map', {})
 if not isinstance(mapping, dict) or not set(mapping).issubset(principals) or any(not isinstance(v, str) or not v for v in mapping.values()):
     raise SystemExit('invalid private identity map')
+telegram_receiver = str(config.get('telegram_receive_user_id', ''))
+slack_receiver = str(config.get('slack_receive_user_id', ''))
+if bool(telegram_receiver) != bool(slack_receiver):
+    raise SystemExit('receive owner IDs must be configured together')
+if telegram_receiver:
+    if (telegram_receiver not in set(map(str, config['telegram_allowed_user_ids'])) or
+            slack_receiver not in set(map(str, config['slack_allowed_user_ids'])) or
+            not isinstance(config.get('slack_bot_user_id'), str) or
+            re.fullmatch(r'U[A-Z0-9]+', config['slack_bot_user_id']) is None):
+        raise SystemExit('receive owner or Slack bot ID is not authorized')
+    telegram_person = mapping.get('telegram:' + telegram_receiver)
+    slack_person = mapping.get('slack:' + slack_receiver)
+    if not telegram_person or telegram_person != slack_person:
+        raise SystemExit('receive owner accounts must map to the same verified person')
 if config.get('weekly_enabled'):
     marker = private / 'weekly-approval.json'
     if not marker.is_file() or stat.S_IMODE(marker.stat().st_mode) & 0o077:
@@ -42,6 +57,9 @@ for key, maximum in [('sha256_max_bytes', 10**10), ('send_max_bytes', 10**9), ('
     value = config.get(key)
     if not isinstance(value, int) or not 1 <= value <= maximum:
         raise SystemExit('invalid resource limit: ' + key)
+receive_limit = config.get('receive_max_bytes', 10 * 1024 * 1024)
+if not isinstance(receive_limit, int) or isinstance(receive_limit, bool) or not 1 <= receive_limit <= 20 * 1024 * 1024:
+    raise SystemExit('invalid resource limit: receive_max_bytes')
 if config.get('planner_endpoint', 'http://pere-blaise:8642') != 'http://pere-blaise:8642':
     raise SystemExit('planner endpoint must be the internal Compose service')
 planner_key = None

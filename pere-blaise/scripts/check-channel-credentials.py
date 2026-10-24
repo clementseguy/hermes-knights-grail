@@ -48,6 +48,8 @@ def main() -> int:
         telegram = secret(private / 'telegram.token')
         slack_bot = secret(private / 'slack-bot.token')
         slack_app = secret(private / 'slack-app.token')
+        config = json.loads((private / 'broker.json').read_text(encoding='utf-8'))
+        receiving = bool(config.get('telegram_receive_user_id') or config.get('slack_receive_user_id'))
         if not re.fullmatch(r'\d+:[A-Za-z0-9_-]+', telegram):
             raise ValueError('Telegram token shape invalid')
         if not slack_bot.startswith('xoxb-') or not slack_app.startswith('xapp-'):
@@ -64,8 +66,13 @@ def main() -> int:
         if not bot_auth.get('ok'):
             print('slack_bot_error:', safe_error(bot_auth))
         print('slack_bot_scopes:', ','.join(sorted(bot_scopes)) if bot_scopes else 'unavailable')
-        missing_bot_scopes = {'app_mentions:read', 'chat:write', 'files:write'} - bot_scopes
+        required = {'app_mentions:read', 'chat:write', 'files:write'}
+        if receiving:
+            required |= {'files:read', 'groups:history'}
+        missing_bot_scopes = required - bot_scopes
         print('slack_bot_missing_scopes:', ','.join(sorted(missing_bot_scopes)) or 'none')
+        bot_identity_matches = not receiving or bot_auth.get('user_id') == config.get('slack_bot_user_id')
+        print('slack_bot_identity_matches_config:', bot_identity_matches)
         connection, app_scopes = request_json('https://slack.com/api/apps.connections.open', slack_app)
         socket = urlparse(connection.get('url', '')) if connection.get('ok') else None
         host = socket.hostname if socket and socket.scheme == 'wss' else None
@@ -76,6 +83,7 @@ def main() -> int:
         print('slack_app_scopes:', ','.join(sorted(app_scopes)) if app_scopes else 'unavailable')
         return 0 if (identity.get('username') == args.telegram_username and webhook.get('ok')
                      and not info.get('url') and bot_auth.get('ok') and not missing_bot_scopes
+                     and bot_identity_matches
                      and connection.get('ok') and host and host.endswith('.slack.com')
                      and 'connections:write' in app_scopes) else 1
     except Exception as exc:
