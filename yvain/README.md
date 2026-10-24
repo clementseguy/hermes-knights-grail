@@ -48,13 +48,27 @@ pas de flux Maestro prêt. Ce code de sortie ne bloque une fusion que lorsqu'un
 workflow GitHub le publie ensuite comme contrôle requis ; ce branchement est
 une étape distincte.
 
-Le script démarre le staging, réinitialise sa base SQLite de recette et y
-réinstalle les fixtures déterministes, puis exécute les cas déclarés : tests Flutter
-déterministes ou flux Maestro. Les tests Flutter sont des contrôles de
-soutien : ils ne rendent jamais une recette QA valide sans au moins un flux
+Le script construit le staging depuis `origin/dev` (ou
+`NEXTARGET_SERVER_BRANCH` dans `config/runner.env`), puis exécute les cas
+déclarés : tests Flutter déterministes ou flux Maestro. Avant chaque flux
+Maestro et sa relance éventuelle, il réinitialise la base SQLite de recette et
+y réinstalle les fixtures déterministes. Les tests Flutter sont des contrôles
+de soutien : ils ne rendent jamais une recette QA valide sans au moins un flux
 Maestro. Pour ces derniers, le script démarre l'AVD si nécessaire, construit
-l'APK et remet les données locales à zéro entre les scénarios. Il produit un
-rapport dans `reports/` et ne crée jamais d'issue GitHub sans validation humaine.
+l'APK DEBUG avec l'URL locale et le SHA du serveur attendus, puis remet les
+données locales à zéro entre les scénarios. L'app vérifie ce SHA par une requête
+depuis l'émulateur avant son lancement. Le rapport contient
+`staging-health.json` avec l'identité du serveur. Il produit un rapport dans
+`reports/` et ne crée jamais d'issue GitHub sans validation humaine.
+
+Pour un lancement manuel après `scripts/staging_qa.sh up` et `reset` côté
+serveur, reprendre le SHA annoncé :
+
+```bash
+bash scripts/run-android-staging.sh <SHA_DU_SERVEUR>
+```
+
+Ajouter `--apk` pour construire l'APK DEBUG utilisé par Maestro.
 
 La remise à zéro locale peut aussi être demandée explicitement avant une
 recette manuelle :

@@ -23,11 +23,20 @@ args=(--app-dir "$NEXTARGET_APP_DIR" --base "$base" --head "$head"
 [[ -n "$story" ]] && args+=(--story "$story")
 python3 "$root_dir/scripts/select_cases.py" "${args[@]}"
 
-docker compose -f "$NEXTARGET_SERVER_DIR/docker-compose.staging.yml" up -d --build --wait
-# Chaque recette démarre avec les seules données déterministes prévues pour QA.
-# La commande est protégée côté serveur : environnement staging + SQLite locale.
-docker compose -f "$NEXTARGET_SERVER_DIR/docker-compose.staging.yml" exec -T \
-  nextarget-staging python -m scripts.qa_data reset
+staging_branch="${NEXTARGET_SERVER_BRANCH:-dev}"
+bash "$NEXTARGET_SERVER_DIR/scripts/staging_qa.sh" up --branch "$staging_branch" \
+  | tee "$report_dir/staging-up.log"
+staging_health="$(curl --fail --silent --show-error --max-time 5 \
+  http://127.0.0.1:18000/health)"
+server_revision="$(python3 -c '
+import json, sys
+health = json.load(sys.stdin)
+if health.get("status") == "ok" and health.get("environment") == "staging":
+    print(health.get("revision") or "")
+' <<< "$staging_health")"
+[[ "$server_revision" =~ ^[0-9a-f]{40}$ ]] \
+  || { echo "Staging sans SHA de commit valide." >&2; exit 1; }
+printf '%s\n' "$staging_health" > "$report_dir/staging-health.json"
 python3 - "$report_dir/selection.json" <<'PY' > "$report_dir/cases.jsonl"
 import json, sys
 for case in json.load(open(sys.argv[1], encoding='utf-8'))['cases']:
@@ -56,8 +65,12 @@ for case in "${cases[@]}"; do
     maestro)
       command -v maestro >/dev/null || { echo "Maestro requis." >&2; exit 2; }
       bash "$root_dir/scripts/ensure_emulator.sh"
-      flutter build apk --debug --dart-define=NEXTARGET_SERVER_URL=http://10.0.2.2:18000
+      NEXTARGET_QA_DEVICE="$YVAIN_DEVICE" \
+        bash "$root_dir/scripts/run-android-staging.sh" \
+          "$server_revision" --apk
       adb -s "$YVAIN_DEVICE" install -r build/app/outputs/flutter-apk/app-debug.apk >/dev/null
+      # Isolate each mobile case from writes made by preceding scenarios.
+      bash "$NEXTARGET_SERVER_DIR/scripts/staging_qa.sh" reset
       bash "$root_dir/scripts/reset-local-app-data.sh"
       maestro_args=(
         --device "$YVAIN_DEVICE"
@@ -67,6 +80,7 @@ for case in "${cases[@]}"; do
         "$root_dir/$target"
       )
       if ! maestro test "${maestro_args[@]}" </dev/null 2>&1 | tee "$report_dir/$name.log"; then
+        bash "$NEXTARGET_SERVER_DIR/scripts/staging_qa.sh" reset
         bash "$root_dir/scripts/reset-local-app-data.sh"
         if ! maestro test "${maestro_args[@]}" </dev/null 2>&1 | tee -a "$report_dir/$name.log"; then
           adb -s "$YVAIN_DEVICE" exec-out screencap -p > "$report_dir/$name.png" || true

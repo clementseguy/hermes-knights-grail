@@ -1,0 +1,9 @@
+appId: com.example.tir_sportif
+---
+# The runner builds this APK with the expected staging SHA. App startup checks
+# /health from inside the emulator before Flutter displays the first screen.
+- launchApp:
+    clearState: true
+- tapOn: "Passer"
+- assertVisible: "Synthèse"
+- takeScreenshot: nt168-local-staging-launch
