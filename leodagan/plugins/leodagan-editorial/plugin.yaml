@@ -1,0 +1,11 @@
+name: leodagan-editorial
+version: 1.0.0
+kind: standalone
+description: Registre privé des brouillons et corrections de Léodagan.
+provides_tools:
+  - editorial_read_source
+  - editorial_create
+  - editorial_save
+  - editorial_get
+  - editorial_feedback
+  - editorial_rules

@@ -1,66 +1,48 @@
-# Exploitation de Léodagan
+# Exploitation locale de Léodagan
 
-## État et diagnostic
+## Prérequis et configuration privée
 
-Le conteneur et le cron sont volontairement arrêtés tant que le `TODO.md` n'est
-pas validé. Lorsqu'ils sont activés, vérifier leur état avec :
-
-```sh
-./scripts/check-health.sh
-docker compose logs --tail 200 leodagan
-docker compose exec leodagan hermes cron list --all
-```
-
-Le healthcheck Docker vérifie rapidement que le heartbeat du gateway a moins
-de deux minutes. Le script `check-health.sh` est plus complet et sert au
-diagnostic manuel ; il ne doit pas être utilisé comme healthcheck Docker.
-
-Un échec de santé impose la pause du cron avant investigation :
+Exécuter depuis la racine du dépôt :
 
 ```sh
-docker compose exec leodagan hermes cron pause ecc666ceb1cb
+./leodagan/scripts/leodagan.sh install
+./leodagan/scripts/leodagan.sh configure
 ```
 
-Les limites du conteneur concernent seulement Léodagan : 1 CPU, 768 Mio et 64
-processus. Lors de leur validation, le gateway consommait environ 210 Mio et
-19 processus au repos. Le conteneur est ensuite arrêté tant que le cron reste
-en pause ; un statut Docker `unhealthy` après cet arrêt est attendu, car aucun
-heartbeat ne peut alors être produit.
+`install` affiche chemins physiques, aperçu `rsync --dry-run --stats`, contrôle le budget de 50 Mio et prépare une release sous `.deployments/leodagan/releases/`. Un second appel avec la même source retourne « Release déjà identique » sans modifier le service ; ce comportement a été testé avec le conteneur arrêté puis actif. Il ne copie pas l'ancien runtime ni la boîte de revue. `configure` crée `~/Library/Application Support/HermesLeodagan/channels.env` en mode 600, **hors du dépôt**. Les jetons Slack restent dans les fichiers séparés `slack-leodagan-bot.token` et `slack-leodagan-app.token` (mode 600) du même dossier ; le script les charge en mémoire au démarrage sans les recopier dans `channels.env`. Renseigner dans ce dernier `SLACK_ALLOWED_USERS` (ID de Clément) et `SLACK_ALLOWED_CHANNELS` (ID de `#agent-leodagan`). Vérifier Socket Mode avec `connections:write`, `app_mentions:read`, `chat:write`, `channels:history` et, d'après l'appel réel du 24 octobre, `groups:history` pour la lecture du contexte des fils ; ne demander aucun scope LinkedIn en écriture. Vérifier qu'un seul consommateur Socket Mode est actif et que le bot est invité au canal. L'ancien `runtime/.env` comporte un jeton bot, mais **pas** de jeton d'app ni d'allowlists ; le script ne le copie pas.
+
+Le skill versionné `skills/leodagan/SKILL.md` est copié dans le `SOUL.md` privé de Hermes par `configure` et lors de l'installation initiale. La version épinglée de Hermes ne charge `skills.auto_load` que lorsque le toolset `skills` est exposé ; ce toolset inclurait la gestion des skills, qui dépasse la mission. Après toute mise à jour du skill, arrêter le service, exécuter `install` puis `configure`, et redémarrer pour ouvrir une nouvelle session.
+
+Les commandes `/...` intégrées Hermes ont une autorisation distincte des toolsets. `config/config.yaml` active la restriction des commandes en définissant une liste d'administrateurs sans ID correspondant, puis n'autorise pour Clément que `/help`, `/whoami`, `/new` et `/stop` sur Slack/Telegram. Le menu Telegram n'affiche que ces quatre commandes. Vérifier dans l'image réellement utilisée que `/cron`, `/loop`, `/model`, `/sethome` et toute commande d'extension sont refusées ; les messages ordinaires restent admis. Le `SOUL.md` seul ne suffit pas à ce contrôle.
+
+Pour les clics exacts dans le portail Slack et la création/test du bot Telegram, suivre [la procédure des canaux privés](canaux-prives.md). Le jeton Telegram est conservé dans un fichier séparé `telegram-leodagan-bot.token` (mode 600) et seul l'ID numérique de Clément est inscrit dans `channels.env`. Activer `telegram.enabled: true` dans la configuration versionnée puis redéployer uniquement après ce provisionnement. Aucun groupe ou autre utilisateur.
+
+Authentifier le compte ChatGPT/Codex **dans le volume propre de Léodagan** avec `hermes auth add openai-codex` dans un conteneur interactif Léodagan (`docker compose run --rm --no-deps --entrypoint hermes leodagan auth add openai-codex`, avec `LEODAGAN_OUTBOX` défini et le fichier Compose de la release). Le flux par défaut est le code d'appareil ; vérifier `hermes auth add --help` dans l'image avant l'opération. Ne copier aucun `auth.json` de Père Blaise ou d'un autre agent. Vérifier le renouvellement et le quota du modèle choisi par un run contrôlé. Le service doit rester arrêté si ce point échoue.
+
+## Démarrage et diagnostic
+
+Après contrôle des allowlists, scopes, stockage, sauvegarde et refus, utiliser :
+
+```sh
+./leodagan/scripts/leodagan.sh start
+./leodagan/scripts/leodagan.sh status
+./leodagan/scripts/leodagan.sh logs 100
+./leodagan/scripts/leodagan.sh stop
+./leodagan/scripts/leodagan.sh restart
+```
+
+`start` refuse les paramètres Slack absents et n'installe aucun job. Vérifier ensuite `docker inspect hermes-leodagan` : nom, santé, volumes, ports publiés vides, capabilities, et absence de socket Docker. La santé Docker peut précéder de quelques secondes la reconnexion Socket Mode ; confirmer `✓ slack connected` et `✓ telegram connected` dans le journal gateway avant une recette. Tester une mention dans le canal autorisé, une réponse dans le même fil, un autre canal et une autre identité (refus), ainsi qu'une erreur de livraison. Pour Telegram, envoyer une nouvelle demande de brouillon après la connexion du polling. Le message de recette doit livrer le post entier et le prompt, puis `editorial_get` doit les retrouver après redémarrage. Les recettes réussies sont `silex-bleu` v1 sur Slack le 15 octobre et `rempart-agent` v1 sur Telegram le 24 octobre. Après propagation de `groups:history`, `conversations.replies` a relu trois messages du fil Slack ; le jeton `xoxb-` n'a pas changé. Hermes peut envoyer au premier DM un avis « No home channel is set for Telegram » : aucune tâche planifiée n'est activée, et ce réglage d'accueil reste absent pour conserver le fonctionnement à la demande.
 
 ## Sauvegarde et restauration
 
-Le runtime contient le jeton OAuth et ne doit pas être copié dans un dépôt ni
-vers un stockage non chiffré. Avant une mise à jour, le propriétaire réalise
-une sauvegarde chiffrée du répertoire `runtime/` selon la politique de
-sauvegarde de son poste, puis vérifie qu'elle est lisible hors du dépôt.
+Créer `~/Library/Application Support/HermesLeodagan/backup.pass` (mode 600) et conserver une copie sûre hors du poste. `backup` arrête Léodagan, chiffre un tar du volume natif avec AES-256-CBC/PBKDF2, vérifie sa lisibilité et crée une somme SHA-256 ; il **ne redémarre pas** le service. Le fichier chiffré contient potentiellement secrets, conversations et brouillons. La restauration `restore ARCHIVE` refuse un conteneur ou volume actif et restaure uniquement vers un volume neuf après contrôle de la somme, des chemins et de la taille décompressée. Vérifier la base, le brouillon et la règle mémoire avant `start`. Le 18 octobre, l'archive contenant `silex-bleu` a été restaurée dans un volume isolé ; intégrité SQLite et empreintes du post/prompt identiques au volume principal. Le volume de test a été retiré et le service relancé. La restauration en production et celle d'une règle mémoire réelle ne l'ont pas été. La sauvegarde ne contient pas les fichiers de jetons et la phrase secrète du répertoire privé ; les conserver séparément, ainsi que la release/configuration correspondante, pour un retour complet.
 
-La restauration s'effectue conteneur arrêté : restaurer `runtime/` depuis la
-sauvegarde chiffrée, vérifier les permissions de `runtime/auth.json`, démarrer
-le conteneur, puis exécuter `./scripts/check-health.sh`. Ne jamais restaurer
-un runtime provenant d'un autre agent Hermes.
+## Mise à jour, arrêt et retrait
 
-Les livrables de `review-inbox/` sont des documents de travail : leur durée de
-conservation et leur emplacement de sauvegarde restent à approuver par le
-propriétaire avant réactivation.
+`update` prépare une nouvelle release et reconfigure le service. **Ne pas l'employer comme migration automatique de production à ce stade** : retour arrière image/config et migration du volume doivent encore être éprouvés. Pour un changement contrôlé, arrêter, sauvegarder, conserver le digest et la release précédents, vérifier le plugin et Compose en staging, puis démarrer et tester avant de retenir la nouvelle release. Si la migration échoue, laisser arrêté et restaurer la sauvegarde vers un volume neuf.
 
-## Mise à jour et retour arrière
+`uninstall` retire le conteneur et son réseau mais conserve le volume, les secrets, l'outbox et les sauvegardes. `purge` affiche les chemins, le volume et leurs tailles, puis exige la saisie exacte `PURGER hermes-leodagan` ; aucune purge n'a été faite. L'ancien runtime de 15 Mio est conservé dans `~/Library/Application Support/HermesLeodagan/legacy-runtime`, hors dépôt ; `review-inbox/` (16 Kio) reste dans le dépôt pour récupération. La suppression d'un ancien déploiement ou une copie avec `--delete` exigent une validation ciblée après affichage des chemins et tailles.
 
-1. Mettre le cron en pause et arrêter le conteneur.
-2. Sauvegarder le runtime chiffré.
-3. Tester intentionnellement une nouvelle image via `HERMES_IMAGE`, puis lancer
-   les contrôles statiques et une édition de test.
-4. Si elle est validée, relever son digest avec `docker image inspect`, le
-   consigner dans `compose.yaml`, puis redéployer le conteneur.
-5. En cas d'échec, revenir au digest précédemment validé dans `compose.yaml`,
-   restaurer le runtime si nécessaire, et garder le cron en pause.
+En cas de perte de canal ou de quota, arrêter le service si nécessaire, conserver les brouillons, corriger l'accès et reprendre par le même identifiant ; aucun fournisseur de repli. Faire tourner les tokens Slack/Telegram dans le portail correspondant puis mettre à jour le fichier privé ; réauthentifier Codex uniquement dans le volume Léodagan. Les journaux sont dans `/opt/data/logs` ; éviter d'en exporter les corps privés et conserver leur rétention jusqu'à décision explicite de purge.
 
-## Révocation OAuth et arrêt définitif
-
-En cas de compromission, arrêter le conteneur, révoquer la session Codex dans
-le compte associé, puis supprimer le fichier `runtime/auth.json` de manière
-récupérable selon la politique du poste. Une nouvelle authentification passe
-par `scripts/adopt-codex-auth.sh` et un test contrôlé.
-
-Pour un arrêt définitif, mettre le cron en pause, arrêter le conteneur,
-sauvegarder ou purger les livrables selon la décision du propriétaire, puis
-archiver le runtime privé séparément de tout autre agent.
+L'image épinglée journalise parfois `Previous gateway life ... exited UNCLEANLY` après un `compose stop` ou une recréation, même quand la commande s'achève et que SQLite retrouve son intégrité après redémarrage. Le mécanisme exact d'arrêt du gateway reste à examiner séparément dans Hermes avant de considérer ce signal comme résolu ; ne pas supprimer les données à cause de cet avertissement seul.

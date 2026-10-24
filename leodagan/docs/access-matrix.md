@@ -1,14 +1,14 @@
-# Matrice d'accès de Léodagan
+# Matrice d'accès
 
-| Ressource | Accès | Identité | Justification | Refus / contrôle |
+| Ressource | Lecture | Écriture/exécution | Identité | Justification et refus |
 | --- | --- | --- | --- | --- |
-| `/opt/data` | Lecture/écriture | utilisateur `hermes` | État Hermes, OAuth et journaux privés | `HERMES_WRITE_SAFE_ROOT` ; aucun montage partagé avec Père Blaise. |
-| `/review-inbox` | Lecture/écriture | utilisateur `hermes` | Livrables prêts à relire | Dossier unique par run ; refus d'écrasement ; aucun autre répertoire métier monté. |
-| `assets/` | Aucun accès conteneur | — | Le style visuel est déjà transcrit en prompt | Aucun montage Docker. |
-| Internet HTTPS sortant | Lecture | réseau Docker isolé | Consultation de sources publiques reconnues | Aucun port publié ; pas de réseau hôte ; pas d'identifiant tiers, de connexion ou de contournement de paywall. |
-| OpenAI/Codex | Inférence OAuth | abonnement du propriétaire | Recherche et rédaction | Jeton isolé dans `runtime/auth.json`; aucun repli API implicite. |
-| Terminal | Commandes courtes de lecture | utilisateur `hermes` | `curl` explicite de sources publiques | Navigateur et `execute_code` interdits par le skill ; écriture via `write_file` seulement. |
-| LinkedIn | Aucun | — | Hors périmètre | Le skill interdit connexion, publication et programmation. |
-| Docker | Aucun accès depuis le conteneur | — | Le conteneur ne s'administre pas lui-même | Aucun socket Docker monté ; capacités Linux réduites. |
-| Telegram | Notification sortante future | bot dédié | Avertir le propriétaire d'un brouillon ou d'un incident | Token hors dépôt ; ID utilisateur unique ; aucun contenu de post ou commande métier. |
-| Slack | Notification sortante future | application dédiée | Même alerte lorsqu'elle sera configurée | Pas de token, canal ni socket configuré avant validation humaine. |
+| Volume `hermes-leodagan-data` `/opt/data` | Oui | SQLite et état Hermes | utilisateur Hermes du conteneur | Aucun montage dans un autre agent ; contrôle `docker inspect` restant. |
+| `/outbox` | Oui | Export textuel seulement | Hermes | Répertoire privé ; `HERMES_WRITE_SAFE_ROOT=/opt/data:/outbox`. |
+| Articles HTTPS publics | Oui via `editorial_read_source` | Aucune | Léodagan | DNS et redirections contrôlés avant connexion ; 403/paywall signalé, jamais contourné. |
+| OpenAI Codex | Inférence | OAuth privé | Léodagan | Aucun fournisseur de secours, pas de clé API. |
+| Slack | Fil de `#agent-leodagan` | Réponse au fil demandé | Bot Léodagan | Un seul utilisateur et canal allowlistés, DM désactivé. |
+| Telegram | DM dédié | Réponse au DM demandé | Bot Léodagan | Un seul ID autorisé, groupes interdits ; bot et polling activés le 24 octobre, réponse et refus encore à tester. |
+| LinkedIn | Page publique ; API officielle conditionnelle | Aucune | Aucun jeton actuel | Aucun scope d'écriture et aucun outil de publication. |
+| Hôte, autre agent, socket Docker | Aucun | Aucun | — | Aucun montage ni port hôte ; test d'isolation de recette restant. |
+
+La configuration charge le skill par `SOUL.md` et expose sur Slack et Telegram `memory`, `session_search` et `leodagan_editorial`. Le toolset `web` a été retiré après deux refus réels de `web_extract` par son backend limité à la recherche ; `editorial_read_source` couvre les liens publics demandés. Une vérification sur l'image chargée a montré l'absence de `terminal`, `execute_code`, `cronjob_manage`, `image_generate`, `delegate_task`, `write_file`, `browser_navigate` et `send_message` de cette surface. Les commandes intégrées Hermes sont contrôlées séparément par `allow_admin_from`/`group_allow_admin_from` sans identité correspondante et les allowlists `/help`, `/whoami`, `/new`, `/stop` ; le menu Telegram est limité à ces quatre entrées. L'image épinglée a résolu ces politiques avec `cron_denied=True` sur les DM et les groupes des deux canaux avant déploiement. Les refus par identité et canal doivent encore être éprouvés avec de vrais comptes.

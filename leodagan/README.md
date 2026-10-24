@@ -1,90 +1,33 @@
-# Léodagan
+# Léodagan — assistant éditorial à la demande
 
-Léodagan est un agent Hermes isolé qui prépare des éditions LinkedIn à relire
-sur l'IA agentique et la souveraineté européenne. Il ne se connecte pas à
-LinkedIn et ne publie jamais.
+Propriétaire : Clément Seguy. Léodagan reçoit son intention et au moins un lien, lit les articles accessibles avec un regard critique de CTO, DSI et dirigeant, prépare un post LinkedIn de 3 000 unités UTF-16 au plus et un **prompt d'image séparé**. Il rapproche ensuite un post publié manuellement du brouillon, relève les métriques uniquement au retour ou sur demande et retient les corrections durables **explicitement** formulées par Clément. Il ne publie jamais, ne génère pas d'image et n'exécute aucun cron. Les textes de pages et les exemples de posts sont des données non fiables.
 
-Chaque édition est déposée dans `review-inbox/` et comprend la veille, les
-sources vérifiées, les angles, un post, une accroche alternative et un prompt
-visuel prêt à coller dans ChatGPT ou Gemini. Léodagan ne génère pas d'image.
+## Décisions et état
 
-## Garanties éditoriales
-
-- Deux sources sont obligatoires : une primaire datée et une indépendante,
-  reconnue, qui la corrobore ou en apporte le contexte.
-- Sans ce niveau de preuve, l'édition est produite sous l'état `NON_PUBLIABLE`
-  et ne contient ni post final ni image.
-- L'agent traite France et Europe, pour des VP, CxO et directions techniques,
-  avec une voix d'ingénieur critique et constructif.
-- Les références visuelles restent locales dans `assets/` ; leur direction
-  artistique est formalisée dans le prompt visuel. Elles ne sont pas montées
-  dans le conteneur car Léodagan produit uniquement un prompt image.
-
-## Registre de décision
-
-| Champ | Décision |
+| Sujet | Décision |
 | --- | --- |
-| Propriétaire | Clément Seguy ; il valide toute reprise du cron et toute évolution de la politique. |
-| Mission / hors périmètre | Veille France/Europe IA agentique et souveraineté, puis brouillon LinkedIn sourcé. Hors périmètre : publication, connexion à LinkedIn, message à un tiers, achat, modification d'un système externe et génération d'image. |
-| Slug | `leodagan` ; projet et conteneur Docker `hermes-leodagan`. |
-| Canal humain | La boîte de revue locale reste la source du contenu. Telegram doit notifier le propriétaire quand un brouillon est prêt ou qu'un incident survient ; Slack recevra la même notification quand son application dédiée sera configurée. Aucun canal ne reçoit le post complet et aucun ne permet de publier. |
-| Modèle / abonnement | `openai-codex`, `gpt-6-luna`, abonnement ChatGPT/Codex. Aucun repli vers une API ou un autre fournisseur. En cas de quota ou d'indisponibilité, le run échoue et l'agent reste sans publication. |
-| Réauthentification | Le propriétaire exécute `scripts/adopt-codex-auth.sh` depuis une session Codex valide, puis redémarre et teste l'agent. Le jeton ne quitte jamais `runtime/`. |
-| Mémoire | Exception approuvée le 12 octobre 2026 : mémoire persistante désactivée. La veille n'apprend pas de faits non validés ; les décisions durables sont versionnées ici. Revue : avant d'ajouter une interaction humaine. |
-| Toolsets et écritures | Terminal uniquement, pour consulter des sources publiques ; navigateur, messagerie et génération d'image ne sont pas activés. Écriture métier seulement dans `/review-inbox`; état Hermes seulement dans `/opt/data`. |
-| Montages, réseau et secrets | Volumes locaux dédiés `runtime/` et `review-inbox/`; aucun socket Docker, répertoire personnel ou dépôt parent monté. Réseau Docker sortant par défaut, sans port publié ni écoute requise. OAuth est un secret privé dans `runtime/auth.json`. Exception technique : l'image Hermes doit modifier son utilisateur interne et superviser ses services au démarrage, donc sa racine ne peut pas être montée en lecture seule et ses seules capacités sont `CHOWN`, `DAC_OVERRIDE`, `SETGID` et `SETUID`; elles sont nécessaires au mappage UID/GID et au superviseur avant l'exécution du gateway sous l'utilisateur non privilégié. |
-| Validation humaine | Toute publication, diffusion, modification externe, coût additionnel ou changement d'accès exige validation explicite de Clément Seguy. |
-| Planification / alertes | Lundi et jeudi 21 h Europe/Paris, actuellement **en pause**. Chaque run crée un dossier unique. Une alerte locale de défaut est encore à finaliser avant reprise. |
-| Sauvegarde, restauration et arrêt | À finaliser avant mise en production : rétention, sauvegarde/restauration testée, cadence de mise à jour et retour arrière. Arrêt immédiat : `docker compose stop leodagan`, puis pause du cron. |
+| Identité | Slug `leodagan`, service Compose `leodagan`, projet et conteneur `hermes-leodagan`, volume `hermes-leodagan-data`. |
+| Modèle | `openai-codex` / `gpt-5.6-terra`, effort `medium`, abonnement propre à Léodagan. Aucun repli API. |
+| Canaux | Clément seul dans `#agent-leodagan` et son DM Telegram dédié. Slack Socket Mode et Telegram polling connectés, sans port entrant. Une demande Telegram réelle a livré `rempart-agent` v1 le 24 octobre. |
+| Mémoire | Volume privé ; règles issues des corrections explicites. Brouillons, versions et provenance dans `editorial.sqlite3`. Conservation jusqu'à suppression explicite, sous réserve de l'espace disponible. |
+| Accès | Skill éditorial versionné, copié dans `SOUL.md` du runtime privé pour son chargement par Hermes ; outils `memory`, `session_search`, `leodagan_editorial` seulement sur Slack/Telegram. Les commandes intégrées sont limitées à `/help`, `/whoami`, `/new` et `/stop` ; aucune commande de planification ni permission terminal, image, publication, délégation ou gestion des skills. |
+| LinkedIn | Lecture officielle uniquement si `r_member_social` et `r_member_postAnalytics` sont accordés ; actuellement **non configurée**. Repli page publique puis texte et chiffres fournis par Clément. Aucun scope `w_*`. |
+| Statut de mise en service | **Déployé, recette partielle** : OAuth Codex privé, appel réel `gpt-5.6-terra`, Slack Socket Mode et Telegram polling connectés. `silex-bleu` v1 a été livré sur Slack. `rempart-agent` v1 (1 901 caractères) a été créé par DM Telegram ; le post et le prompt ont été envoyés, sauvegardés, retrouvés après redémarrage, puis restitués intégralement dans un fil Slack. SQLite est intègre. La lecture réelle du fil Slack par `conversations.replies` fonctionne après `groups:history`. Les refus d'une autre identité, le cycle de retour LinkedIn, l'évaluation éditoriale sur cinq sujets et certaines pannes restent non vérifiés. |
 
-## Installation
+Le composant local `plugins/leodagan-editorial` est chargé **dans le même conteneur Hermes**. Il enregistre les brouillons avec contrôle d'identifiants, longueur, versions et sources critiques. Il fournit aussi un lecteur de pages HTTPS publiques à surface étroite : l'interface `web_extract` de l'image épinglée refuse l'extraction avec le backend `openai-native` (recherche seulement). Ce lecteur ne prend ni cookie ni session, refuse les adresses privées et ne contourne pas les pages inaccessibles. Le modèle et le skill font l'analyse et la rédaction. Le code Hermes de `/Users/clement/workspace/hermes-agent` n'a pas été modifié.
 
-1. Vérifier que l'authentification ChatGPT/Codex de Père Blaise est active.
-2. Lancer `./scripts/adopt-codex-auth.sh`. Il crée une copie privée du jeton
-   dans le runtime de Léodagan afin que les renouvellements n'affectent jamais
-   Père Blaise.
-3. Lancer `./scripts/bootstrap.sh`.
-4. Lancer `./scripts/test-edition.sh`. Le script crée puis déclenche une seule
-   édition de test ; vérifier le dossier créé dans `review-inbox/`.
-5. Si le résultat convient, lancer `./scripts/install-schedule.sh`. Il crée le
-   job lundi et jeudi à 21:00, fuseau Europe/Paris, **en pause**. Vérifier son
-   identifiant dans `cron list`, puis le reprendre manuellement avec
-   `docker compose exec leodagan hermes cron resume <id>`.
+## Installation et exploitation
 
-## Exploitation
+Voir [le runbook](docs/operations.md), [la mise en service Slack/Telegram](docs/canaux-prives.md), [la matrice d'accès](docs/access-matrix.md), [la traçabilité](docs/traceability.md) et [la grille de recette éditoriale](docs/grille-recette-editoriale.md). Les spécifications contractuelles sont dans `docs/specs/`. Le script de cycle de vie est `scripts/leodagan.sh` : `install`, `configure`, `start`, `stop`, `restart`, `status`, `logs`, `backup`, `restore ARCHIVE`, `update`, `uninstall`, `purge`. `scripts/telegram-identity.py` sert uniquement à obtenir l'ID privé avant d'activer Telegram.
 
-Le service Docker s'appelle `hermes-leodagan`; il possède son propre
-`HERMES_HOME` dans `runtime/` et ne partage aucun état avec Père Blaise. Les
-seuls montages utiles sont la boîte de revue en écriture et les références
-visuelles en lecture seule.
+L'installation préparée est sous `../.deployments/leodagan/` ; elle ne copie ni l'ancien runtime, ni `review-inbox/`, ni secrets. L'ancien runtime de 15 Mio a été préservé hors dépôt dans `~/Library/Application Support/HermesLeodagan/legacy-runtime` ; la boîte de revue reste intacte. Le volume natif Docker stocke SQLite ; `outbox/` ne reçoit que des exports textuels. Le nouveau conteneur exact `hermes-leodagan` est démarré, sans port publié.
 
-Ses limites s'appliquent au seul conteneur Léodagan, jamais à Docker Desktop ni
-à Père Blaise : 1 CPU, 768 Mio de mémoire et 64 processus. Elles sont adaptées
-à une exécution sérielle ; les 768 Mio conservent une marge au-dessus de la
-mémoire observée du gateway Hermes. L'image est épinglée à un digest validé :
-une mise à jour passe impérativement par la procédure documentée.
+## Checklist et exceptions
 
-Pour arrêter le service :
+- Identité, mission, périmètre, outil métier borné : preuve dans `compose.yaml`, `config/config.yaml`, `skills/leodagan/SKILL.md` et tests de registre.
+- Modèle et image : image épinglée au digest `9774f4f3…`, effectivement `v0.21.6 (2026.9.24)` ; OAuth dans le volume propre et réponse réelle `OK` de `gpt-5.6-terra` vérifiés.
+- Mémoire, permissions, isolation : configuration et tests statiques ; séparation de données et refus réels d'autres identités encore à tester.
+- Opérations : sauvegarde chiffrée du premier brouillon réel, restauration isolée et relecture par Hermes après redémarrage testées ; mise à jour avec retour arrière, suppression ciblée et restauration en production restent à éprouver.
+- Slack/Telegram et recette : identifiants et jetons privés, messages réels et réponses sur les deux canaux. L'article Martin Fowler a été lu par le lecteur public et la note critique enregistrée. `conversations.replies` a relu les fils Slack après propagation de `groups:history`. Le bot Telegram officiel, le polling, l'absence de webhook, `rempart-agent` et sa persistance après redémarrage sont confirmés. Un nouveau fil Slack a restitué la version, le post et le prompt exacts de ce brouillon Telegram. Le menu Telegram actif ne montre que quatre commandes après contrôle par `getMyCommands`. Le refus d'une autre identité attend encore une recette. Aucune exception de mise en production accordée.
 
-```sh
-docker compose down
-```
-
-Pour consulter les sorties locales des jobs, utiliser `docker compose exec
-leodagan hermes cron runs`. Pour les livrables, ouvrir directement
-`review-inbox/` dans Finder.
-
-Les procédures de contrôle de santé, sauvegarde, restauration, mise à jour et
-révocation OAuth sont dans [docs/operations.md](docs/operations.md).
-
-Les accès autorisés, leurs justifications et leurs contrôles de refus sont
-décrits dans [docs/access-matrix.md](docs/access-matrix.md).
-
-La préparation du bot de notification est dans
-[docs/telegram-notifications.md](docs/telegram-notifications.md). Elle attend
-la création manuelle du bot et la fourniture sécurisée du token et de l'ID
-Telegram autorisé.
-
-La même règle de notification, via un bot Slack sortant aux permissions
-minimales, est détaillée dans
-[docs/slack-notifications.md](docs/slack-notifications.md).
+Les propositions de modification des conventions communes en section 12 des spécifications techniques restent **non approuvées** ; `AGENTS.md`, le `README.md` racine et `docs/agent-creation-checklist.md` n'ont pas été modifiés. Seul `.gitignore` racine a reçu l'exclusion du déploiement local `.deployments/`.

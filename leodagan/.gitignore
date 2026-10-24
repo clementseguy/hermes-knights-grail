@@ -1,5 +1,8 @@
 # Hermes runtime state and credentials
 runtime/
+.private/
+outbox/
+.deployments/
 .env
 auth.json
 

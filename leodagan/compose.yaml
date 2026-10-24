@@ -1,27 +1,14 @@
 name: hermes-leodagan
-
 services:
   leodagan:
-    # Pin the locally validated Hermes image. Set HERMES_IMAGE only when
-    # intentionally testing an update, then record the new validated digest.
     image: ${HERMES_IMAGE:-nousresearch/hermes-agent@sha256:9774f4f39a9bb8c2f68ce728ed5e99ddbad282163be56764afacf88ed952b784}
     container_name: hermes-leodagan
-    restart: unless-stopped
-    cap_drop:
-      - ALL
-    # Required only for Hermes' s6 entrypoint to map the host UID/GID and
-    # supervise the unprivileged `hermes` gateway process.
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - SETGID
-      - SETUID
-    security_opt:
-      - no-new-privileges:true
-    # Léodagan runs a short, serial research workflow. These limits leave room
-    # for the Hermes gateway while containing an accidental runaway task.
+    restart: "no"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
     pids_limit: 64
-    mem_limit: 768m
+    mem_limit: 1024m
     cpus: 1.0
     healthcheck:
       test: ["CMD-SHELL", "find /opt/data/state/gateway.heartbeat -mmin -2 -print -quit | grep -q ."]
@@ -32,12 +19,24 @@ services:
     environment:
       HERMES_UID: ${HERMES_UID:-1000}
       HERMES_GID: ${HERMES_GID:-1000}
+      HERMES_HOME: /opt/data
+      HERMES_WRITE_SAFE_ROOT: /opt/data:/outbox
+      GATEWAY_ALLOW_ALL_USERS: "false"
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
+      SLACK_ALLOWED_USERS: ${SLACK_ALLOWED_USERS:-}
+      SLACK_ALLOWED_CHANNELS: ${SLACK_ALLOWED_CHANNELS:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS:-}
       TZ: Europe/Paris
-      # Hermes defaults to /opt/data. Keep it while also allowing the local review inbox.
-      HERMES_WRITE_SAFE_ROOT: /opt/data:/review-inbox
     volumes:
-      - ./runtime:/opt/data
-      - ./review-inbox:/review-inbox
+      - hermes-leodagan-data:/opt/data
+      - ./plugins/leodagan-editorial:/opt/data/plugins/leodagan-editorial:ro
+      - ./skills/leodagan:/opt/data/skills/leodagan:ro
+      - ${LEODAGAN_OUTBOX:?set a private outbox path}:/outbox
     tmpfs:
       - /tmp:mode=1777,size=256m
     command: ["gateway", "run"]
+volumes:
+  hermes-leodagan-data:
+    name: hermes-leodagan-data

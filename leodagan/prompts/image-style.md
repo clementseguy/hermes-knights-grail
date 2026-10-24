@@ -1,18 +1,3 @@
-# Direction artistique
+# Direction artistique du prompt image
 
-Créer une illustration horizontale 16:9 dans l'esprit des références présentes
-dans `/references` : bande dessinée franco-belge médiévale et steampunk,
-trait encré net, personnages expressifs, automates en laiton riveté,
-chevaliers et châteaux voûtés. Employer une palette froide bleu clair,
-gris ardoise, argent et laiton discret ; éviter les ocres dominants et le
-photoréalisme.
-
-Mettre en scène une idée unique, lisible en une seconde : tension entre vitesse
-et contrôle, autonomie et supervision, dépendance et souveraineté, ou dette
-technique et exploitation. Une machinerie cohérente, quelques tuyaux, jauges,
-parchemins ou un bouton rouge STOP sont possibles si le sujet s'y prête.
-
-Ne pas créer de schéma, infographie, grille de maturité complexe, bulle ou bloc
-de texte. Aucun texte lisible, à l'exception exceptionnelle d'un mot symbolique
-très court comme « STOP ». Ne pas utiliser le visage ou l'identité d'une
-personne réelle.
+Illustration horizontale 16:9, bande dessinée médiévale semi-réaliste, palette froide bleu et ardoise avec laiton discret. Une idée visuelle centrale, lisible rapidement dans le fil LinkedIn. Des éléments de machinerie, parchemin ou architecture sont possibles si le sujet le justifie. Éviter photoréalisme, schéma complexe, texte lisible, visage d'acteur et imitation précise d'artiste. Léodagan écrit seulement le prompt : il ne génère ni ne télécharge une image.

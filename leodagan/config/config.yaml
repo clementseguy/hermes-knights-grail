@@ -1,23 +1,50 @@
 model:
   provider: openai-codex
-  default: gpt-6-luna
-
+  default: gpt-5.6-terra
 agent:
-  max_turns: 14
-  reasoning_effort: low
-
+  max_turns: 18
+  reasoning_effort: medium
 memory:
-  memory_enabled: false
-  user_profile_enabled: false
-
-# Keep the agent's exposure small: it consults public sources through short,
-# explicit terminal commands and writes a local review bundle. Browser, image
-# generation and external messaging are intentionally not enabled.
+  memory_enabled: true
+  user_profile_enabled: true
+sessions:
+  auto_prune: false
+skills:
+  project_discovery: false
+  inline_shell: false
+  write_approval: true
 platform_toolsets:
-  api_server:
-    - terminal
-
+  slack: [memory, session_search, leodagan_editorial]
+  telegram: [memory, session_search, leodagan_editorial]
+  cli: [memory, session_search, leodagan_editorial]
+  api_server: []
+  cron: []
 gateway:
   allow_all_users: false
-  media_delivery_allow_dirs:
-    - /review-inbox
+slack:
+  enabled: true
+  require_mention: true
+  reply_in_thread: true
+  disable_dms: true
+  allow_admin_from: ["__no_admin__"]
+  group_allow_admin_from: ["__no_admin__"]
+  user_allowed_commands: [help, whoami, new, stop]
+  group_user_allowed_commands: [help, whoami, new, stop]
+telegram:
+  enabled: true
+  dm_policy: allowlist
+  group_policy: disabled
+  allow_admin_from: ["__no_admin__"]
+  group_allow_admin_from: ["__no_admin__"]
+  user_allowed_commands: [help, whoami, new, stop]
+  group_user_allowed_commands: [help, whoami, new, stop]
+platforms:
+  telegram:
+    extra:
+      command_menu:
+        max_commands: 4
+        priority_mode: replace
+        priority: [help, whoami, new, stop]
+plugins:
+  enabled: [leodagan-editorial]
+  auto_update_check_hours: 0
