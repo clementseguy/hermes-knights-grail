@@ -181,6 +181,7 @@ Un `update` qui échoue revient à l'image et à la configuration validées ; si
 | T-SOURCE | Article accessible, lien mort, 403, redirection dangereuse, texte contradictoire, injection dans page ; provenance. | F-003, F-004, F-005, F-017 |
 | T-STYLE | Cinq dossiers réels distincts évalués par Clément avec grille ton, raisonnement, nuance, utilité ; seuil 4/5. | F-006 |
 | T-CRIT | Sur au moins deux articles de qualité différente, vérifier la note par source : preuve, limite, objection CTO/DSI, impact exécutif et analyse réellement utilisée dans le brouillon. | F-005, F-006, F-023 |
+| T-REVIEW | Sur une nouvelle version, vérifier un appel Codex distinct sans historique de rédaction, les avis DSI/CTO/RSSI/CEO et provenance, le refus d'un avis bloquant, d'une revue périmée ou absente, et l'identité exacte du texte approuvé et enregistré. | F-025 |
 | T-DRAFT | Comptage déterministe UTF-16 avec emoji, 3 000 exact/3 001 refusé, idempotence, écriture atomique et restauration des versions. | F-007, F-009, F-010, F-017 |
 | T-ID | Créer `café-géant`, retrouver avec `cafe-geant`, `CAFÉ-GÉANT` et Unicode décomposé depuis Telegram ; rejeter une collision et retrouver par réponse dans le fil. | F-009, F-012, F-022 |
 | T-IMAGE | Vérifier prompt 16:9, style, lisibilité et absence d'appel au générateur d'image. | F-008 |
