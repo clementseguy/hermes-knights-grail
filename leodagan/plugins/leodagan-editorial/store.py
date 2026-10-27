@@ -219,14 +219,14 @@ class Store:
         roles = ("dsi", "cto", "rssi", "ceo")
         if report.get("verdict") not in ("approve", "revise") or not all(
             isinstance(report.get(role), dict) and report[role].get("finding") and
-            report[role].get("severity") in ("ok", "minor", "blocking") for role in (*roles, "source_check")
+            report[role].get("severity") in ("ok", "minor", "blocking") for role in (*roles, "source_check", "voice_check")
         ) or not isinstance(report.get("required_changes"), list) or not all(
             isinstance(item, str) and item.strip() for item in report["required_changes"]
         ):
             raise ValueError("rapport de relecture incomplet")
         approved = (report["verdict"] == "approve" and
                     not report["required_changes"] and
-                    all(report[role]["severity"] != "blocking" for role in (*roles, "source_check")))
+                    all(report[role]["severity"] != "blocking" for role in (*roles, "source_check", "voice_check")))
         status = "APPROVED" if approved else "CHANGES_REQUIRED"
         with self.db:
             result = self.db.execute("UPDATE editorial_reviews SET status=?,report_json=?,provider=?,model=?,reviewed_at=? WHERE id=? AND status='PENDING'",

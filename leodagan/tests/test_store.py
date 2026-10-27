@@ -16,7 +16,7 @@ SOURCE = [{"url": "https://example.org/article", "access_status": "user", "acces
                "executive_impact": "valider la réversibilité"}}]
 APPROVAL = {"verdict": "approve", "required_changes": [],
             **{role: {"finding": "contrôle satisfaisant", "severity": "ok"}
-               for role in ("dsi", "cto", "rssi", "ceo", "source_check")}}
+               for role in ("dsi", "cto", "rssi", "ceo", "source_check", "voice_check")}}
 
 
 class StoreTests(unittest.TestCase):
@@ -83,6 +83,17 @@ class StoreTests(unittest.TestCase):
         self.s.save("cafe-geant", first)
         with self.assertRaises(ValueError):
             self.s.save("cafe-geant", stale)
+
+    def test_voice_review_is_required_and_can_block_delivery(self):
+        self.s.create("Sujet", ["https://example.org/article"], "slack", "thread", "msg", "café-géant")
+        missing = {k: v for k, v in APPROVAL.items() if k != "voice_check"}
+        review = self.s.prepare_review("cafe-geant", "Un post", "Image 16:9", "raisonnement", SOURCE)
+        with self.assertRaisesRegex(ValueError, "incomplet"):
+            self.s.complete_review(review["review_id"], missing, "openai-codex", "gpt-5.6-terra")
+        blocked = {**APPROVAL, "voice_check": {"finding": "Résumé générique sans arbitrage", "severity": "blocking"}}
+        self.assertEqual(self.s.complete_review(review["review_id"], blocked, "openai-codex", "gpt-5.6-terra")["status"], "CHANGES_REQUIRED")
+        with self.assertRaises(ValueError):
+            self.s.save("cafe-geant", review["review_id"])
 
     def test_existing_v1_draft_migrates_without_losing_sources(self):
         self.s.db.execute("INSERT INTO drafts VALUES(?,?,?,?,?,?,?,?)",

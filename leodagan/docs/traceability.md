@@ -9,7 +9,7 @@
 | F-003 | `store.py`, skill | `test_store.py` ; demande professionnelle réelle du 15 octobre à 22:38 | Intention et URL enregistrées dans `silex-bleu` **OK** ; question pour demande incomplète observée dans un autre fil. |
 | F-004 | `reader.py`, `store.py`, skill | `editorial_read_source` réel ; `test_reader.py` | Martin Fowler HTTP 200, 27 190 caractères extraits, URL/date/statut/note conservés **OK** ; corpus varié **partiel**. |
 | F-005 | Skill, prompts, `store.py` | Lecture du post réel et de sa note de source | Faits attribués à l'article, analyse et limite visibles **OK sur un dossier** ; revue humaine systématique **non vérifiée**. |
-| F-006 | Skill, prompts | Grille T-STYLE de cinq dossiers | Évaluation de Clément **non réalisée** ; seuil 4/5 **non vérifié**. |
+| F-006 | Voix active dans `SOUL.md`, onze posts remis par Clément dans `docs/exemples/linkedin-20261027.md`, corpus analysé dans `prompts/editorial-policy.md`, `voice_check` indépendant | Grille T-STYLE de cinq dossiers ; test de refus si `voice_check` manque ou bloque | Onze posts lus le 27 octobre ; automatisation de la vérification de voix ajoutée. Évaluation de Clément **non réalisée** ; seuil 4/5 **non vérifié**. |
 | F-007 | `store.py` | `test_length_versions_atomicity_and_restart` ; version réelle | 3 000 admis, 3 001 UTF-16 refusé en test ; post réel 1 670 unités **OK**. |
 | F-008 | Skill, `store.py`, config | Fil Slack du 15 octobre à 22:49 ; inspection des toolsets | Prompt 16:9 séparé livré, aucun générateur d'image exposé **OK** ; appréciation visuelle humaine **non vérifiée**. |
 | F-009 | `store.py`, volume Compose | Version 1 avant/après `restart` ; `hermes chat -q` avec `editorial_get` | Post et prompt retrouvés par Hermes après redémarrage **OK**. |

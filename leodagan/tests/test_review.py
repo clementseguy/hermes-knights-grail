@@ -19,7 +19,7 @@ class FakeLLM:
         self.kwargs = kwargs
         report = {"verdict": "approve", "required_changes": [],
                   **{role: {"finding": "ok", "severity": "ok"}
-                     for role in ("dsi", "cto", "rssi", "ceo", "source_check")}}
+                     for role in ("dsi", "cto", "rssi", "ceo", "source_check", "voice_check")}}
         return SimpleNamespace(text=json.dumps(report), provider="openai-codex", model="gpt-5.6-terra")
 
 
@@ -33,6 +33,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(llm.kwargs["provider"], "openai-codex")
         self.assertEqual(llm.kwargs["model"], "gpt-5.6-terra")
         self.assertIn("RSSI", llm.kwargs["messages"][0]["content"])
+        self.assertIn("voice_check", llm.kwargs["messages"][0]["content"])
 
     def test_rejects_unexpected_provider(self):
         class Other(FakeLLM):

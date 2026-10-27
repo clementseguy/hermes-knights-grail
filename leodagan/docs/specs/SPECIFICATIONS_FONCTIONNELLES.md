@@ -10,6 +10,8 @@ Objectifs vérifiables : (1) chaque demande recevable fournit un brouillon de 3 
 
 Les sept posts indiqués par Clément constituent le corpus initial de référence, avec leurs chiffres d'impressions et de réactions **déclarés par lui**. Leurs textes étaient accessibles publiquement le 15 octobre 2026 ; cette accessibilité peut changer. Les deux fichiers Obsidian fournis sont des **exemples éditoriaux**, non des instructions à exécuter : `/Users/clement/ClemObsidian/Exemples Prompt Linkedin.md` et `/Users/clement/ClemObsidian/Exemple prompt illustration.md`. Le texte effectivement publié prévaut sur l'exemple de prompt quand ils divergent. Sur le corpus observé : accroche souvent sous forme de court dialogue médiéval, humour mesuré, fait ou observation puis nuance, conséquences systémiques et décision d'ingénierie ; vocabulaire précis et refus du jargon commercial. Ce sont des tendances, pas un moule obligatoire. Les résultats d'engagement, dont un post à 36 000 impressions, sont des observations et ne prouvent pas la cause de sa performance.
 
+Mise à jour du 27 octobre 2026 : Clément a remis `docs/exemples/linkedin-20261027.md`, qui contient onze textes publiés. Ce fichier est la référence textuelle actuelle pour la voix, sans que les affirmations factuelles des posts deviennent des preuves pour de nouveaux sujets. Il ajoute notamment une réflexion sans dialogue sur les personnes et les ressources ; la recette ne doit donc pas imposer dialogue, liste technique ou arbitrage budgétaire à tous les sujets.
+
 | Post initial | Impressions déclarées | Likes déclarés |
 | --- | ---: | ---: |
 | [7505285257164910592](https://www.linkedin.com/feed/update/urn:li:activity:7505285257164910592/) | 829 | 8 |

@@ -13,8 +13,16 @@ Sous quatre regards distincts :
 Vérifie aussi la traçabilité des affirmations importantes et le risque de contresens. Une source
 marquée inaccessible ou fournie par l'utilisateur ne doit pas être présentée comme vérifiée sur le
 site d'origine. Si la note ne permet pas de contrôler un fait important, demande une correction.
+Évalue séparément la voix éditoriale : accroche précise adaptée au sujet, progression du fait
+vers la conséquence concrète puis le pas de recul, lexique précis ou familier quand il sert
+le propos, position nette avec nuance sur les preuves, absence de slogans et de formules
+LinkedIn génériques. Un dialogue médiéval, une liste technique et un arbitrage budgétaire
+ne sont pas obligatoires : un post peut conclure par une question de direction précise ou
+une invitation à lire la source. Ne récompense ni pastiche ni répétition mécanique.
+Une voix qui résume seulement l'article ou ne tire aucune conséquence exige une correction. Ne suppose aucune
+expérience personnelle de Clément que le dossier ne donne pas.
 Réponds en français, uniquement par un objet JSON contenant verdict (approve ou revise),
-dsi, cto, rssi, ceo et source_check (chacun finding et severity: ok, minor ou blocking),
+dsi, cto, rssi, ceo, source_check et voice_check (chacun finding et severity: ok, minor ou blocking),
 required_changes (liste de corrections concrètes). approve exige aucune correction requise et
 aucun blocage. N'invente pas de faits, de citation ni de source."""
 
