@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import ipaddress
 import os
 import re
@@ -71,6 +72,10 @@ class Store:
         CREATE TABLE IF NOT EXISTS requested_sources(
           draft_id TEXT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
           url TEXT NOT NULL, PRIMARY KEY(draft_id,url));
+        CREATE TABLE IF NOT EXISTS source_events(
+          draft_id TEXT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+          url TEXT NOT NULL, added_at TEXT NOT NULL,
+          PRIMARY KEY(draft_id,url));
         CREATE TABLE IF NOT EXISTS versions(
           draft_id TEXT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
           version INTEGER NOT NULL, post_text TEXT NOT NULL, char_count INTEGER NOT NULL,
@@ -93,7 +98,25 @@ class Store:
           draft_id TEXT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
           version INTEGER NOT NULL, platform TEXT NOT NULL, thread TEXT NOT NULL,
           state TEXT NOT NULL, attempted_at TEXT NOT NULL);
-        PRAGMA user_version=1;
+        CREATE TABLE IF NOT EXISTS editorial_reviews(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          draft_id TEXT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+          base_version INTEGER NOT NULL,
+          post_text TEXT NOT NULL, image_prompt TEXT NOT NULL,
+          reasoning_note TEXT NOT NULL, sources_json TEXT NOT NULL,
+          candidate_hash TEXT NOT NULL,
+          status TEXT NOT NULL, report_json TEXT,
+          provider TEXT, model TEXT,
+          created_at TEXT NOT NULL, reviewed_at TEXT);
+        CREATE TABLE IF NOT EXISTS review_version_links(
+          draft_id TEXT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+          version INTEGER NOT NULL, review_id INTEGER NOT NULL UNIQUE
+            REFERENCES editorial_reviews(id),
+          PRIMARY KEY(draft_id,version));
+        INSERT OR IGNORE INTO source_events(draft_id,url,added_at)
+          SELECT s.draft_id,s.url,d.created_at FROM requested_sources s
+          JOIN drafts d ON d.id=s.draft_id;
+        PRAGMA user_version=2;
         COMMIT;
         """)
 
@@ -133,9 +156,20 @@ class Store:
                 (identifier, key(identifier), intent.strip(), platform, thread, message_key or None, "RESEARCH", now()))
             for item in urls:
                 self.db.execute("INSERT INTO requested_sources VALUES(?,?)", (identifier, item))
+                self.db.execute("INSERT INTO source_events VALUES(?,?,?)", (identifier, item, now()))
         return {"id": identifier, "status": "RESEARCH", "urls": urls}
 
-    def save(self, identifier: str, post: str, image_prompt: str, reasoning: str, sources: list[dict]) -> dict:
+    def add_source(self, identifier: str, source_url: str) -> dict:
+        url(source_url)
+        with self.db:
+            draft_id = self._resolve(identifier)
+            result = self.db.execute("INSERT OR IGNORE INTO requested_sources VALUES(?,?)", (draft_id, source_url))
+            if result.rowcount:
+                self.db.execute("INSERT INTO source_events VALUES(?,?,?)", (draft_id, source_url, now()))
+        return {"id": draft_id, "url": source_url, "added": bool(result.rowcount)}
+
+    def _validate_candidate(self, identifier: str, post: str, image_prompt: str,
+                            reasoning: str, sources: list[dict]) -> tuple[str, int]:
         count = length(post)
         if not post.strip() or count > 3000:
             raise ValueError(f"post invalide : {count} unités UTF-16 (maximum 3000)")
@@ -143,8 +177,14 @@ class Store:
             raise ValueError("prompt image 16:9 requis")
         if not sources or not all(isinstance(s, dict) and all(k in s for k in ("url", "access_status", "accessed_at", "critical_review")) for s in sources):
             raise ValueError("sources et lecture critique par article requises")
+        seen = set()
         for source in sources:
             url(source["url"])
+            if source["url"] in seen:
+                raise ValueError("source répétée")
+            seen.add(source["url"])
+            if source.get("final_url"):
+                url(source["final_url"])
             if source["access_status"] not in ("read", "partial", "inaccessible", "user"):
                 raise ValueError("état d'accès à la source invalide")
             try:
@@ -156,17 +196,72 @@ class Store:
             review = source["critical_review"]
             if not isinstance(review, dict) or not all(review.get(k) for k in ("thesis", "evidence", "limits", "cto_objection", "executive_impact")):
                 raise ValueError("note critique incomplète")
+        draft_id = self._resolve(identifier)
+        requested = {r[0] for r in self.db.execute("SELECT url FROM requested_sources WHERE draft_id=?", (draft_id,))}
+        if requested != seen:
+            raise ValueError("chaque article demandé doit avoir une note de source ; ajouter les nouveaux liens avec editorial_add_source")
+        return draft_id, count
+
+    def prepare_review(self, identifier: str, post: str, image_prompt: str,
+                       reasoning: str, sources: list[dict]) -> dict:
+        draft_id, count = self._validate_candidate(identifier, post, image_prompt, reasoning, sources)
+        payload = json.dumps({"post": post, "image_prompt": image_prompt, "reasoning": reasoning,
+                              "sources": sources}, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        with self.db:
+            current = self.db.execute("SELECT COALESCE(MAX(version),0) FROM versions WHERE draft_id=?", (draft_id,)).fetchone()[0]
+            cursor = self.db.execute("INSERT INTO editorial_reviews(draft_id,base_version,post_text,image_prompt,reasoning_note,sources_json,candidate_hash,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (draft_id, current, post, image_prompt, reasoning, json.dumps(sources, ensure_ascii=False), digest, "PENDING", now()))
+        return {"review_id": cursor.lastrowid, "id": draft_id, "candidate_hash": digest,
+                "char_count": count, "base_version": current}
+
+    def complete_review(self, review_id: int, report: dict, provider: str, model: str) -> dict:
+        roles = ("dsi", "cto", "rssi", "ceo")
+        if report.get("verdict") not in ("approve", "revise") or not all(
+            isinstance(report.get(role), dict) and report[role].get("finding") and
+            report[role].get("severity") in ("ok", "minor", "blocking") for role in (*roles, "source_check")
+        ) or not isinstance(report.get("required_changes"), list) or not all(
+            isinstance(item, str) and item.strip() for item in report["required_changes"]
+        ):
+            raise ValueError("rapport de relecture incomplet")
+        approved = (report["verdict"] == "approve" and
+                    not report["required_changes"] and
+                    all(report[role]["severity"] != "blocking" for role in (*roles, "source_check")))
+        status = "APPROVED" if approved else "CHANGES_REQUIRED"
+        with self.db:
+            result = self.db.execute("UPDATE editorial_reviews SET status=?,report_json=?,provider=?,model=?,reviewed_at=? WHERE id=? AND status='PENDING'",
+                (status, json.dumps(report, ensure_ascii=False), provider, model, now(), review_id))
+            if not result.rowcount:
+                raise ValueError("relecture absente ou déjà terminée")
+        return {"review_id": review_id, "status": status, "report": report,
+                "provider": provider, "model": model}
+
+    def fail_review(self, review_id: int, reason: str) -> None:
+        with self.db:
+            self.db.execute("UPDATE editorial_reviews SET status='ERROR',report_json=?,reviewed_at=? WHERE id=? AND status='PENDING'",
+                            (json.dumps({"reason": reason}), now(), review_id))
+
+    def save(self, identifier: str, review_id: int) -> dict:
         with self.db:
             draft_id = self._resolve(identifier)
-            requested = {r[0] for r in self.db.execute("SELECT url FROM requested_sources WHERE draft_id=?", (draft_id,))}
-            if requested != {s["url"] for s in sources}:
-                raise ValueError("chaque article demandé doit avoir une note de source")
+            row = self.db.execute("SELECT * FROM editorial_reviews WHERE id=? AND draft_id=? AND status='APPROVED'", (review_id, draft_id)).fetchone()
+            if row is None:
+                raise ValueError("relecture indépendante approuvée requise")
+            if self.db.execute("SELECT 1 FROM review_version_links WHERE review_id=?", (review_id,)).fetchone():
+                raise ValueError("relecture déjà utilisée")
+            post, image_prompt, reasoning = row["post_text"], row["image_prompt"], row["reasoning_note"]
+            sources = json.loads(row["sources_json"])
+            _, count = self._validate_candidate(identifier, post, image_prompt, reasoning, sources)
             current = self.db.execute("SELECT COALESCE(MAX(version),0) FROM versions WHERE draft_id=?", (draft_id,)).fetchone()[0]
+            if current != row["base_version"]:
+                raise ValueError("relecture périmée : une autre version a été enregistrée")
             version = current + 1
             self.db.execute("INSERT INTO versions VALUES(?,?,?,?,?,?,?,?)",
                 (draft_id, version, post, count, image_prompt, reasoning, json.dumps(sources, ensure_ascii=False), now()))
+            self.db.execute("INSERT INTO review_version_links VALUES(?,?,?)", (draft_id, version, review_id))
             self.db.execute("UPDATE drafts SET status='SAVED' WHERE id=?", (draft_id,))
-        return {"id": draft_id, "version": version, "char_count": count, "status": "SAVED"}
+        return {"id": draft_id, "version": version, "char_count": count, "status": "SAVED",
+                "review_id": review_id, "candidate_hash": row["candidate_hash"]}
 
     def get(self, identifier: str) -> dict:
         draft_id = self._resolve(identifier)
@@ -176,6 +271,10 @@ class Store:
             row["sources"] = json.loads(row.pop("sources_json"))
         draft["versions"] = versions
         draft["requested_urls"] = [r[0] for r in self.db.execute("SELECT url FROM requested_sources WHERE draft_id=? ORDER BY url", (draft_id,))]
+        draft["source_events"] = [dict(r) for r in self.db.execute("SELECT url,added_at FROM source_events WHERE draft_id=? ORDER BY added_at,url", (draft_id,))]
+        draft["reviews"] = [dict(r) for r in self.db.execute("SELECT r.id,r.base_version,r.candidate_hash,r.status,r.report_json,r.provider,r.model,r.created_at,r.reviewed_at,l.version FROM editorial_reviews r LEFT JOIN review_version_links l ON l.review_id=r.id WHERE r.draft_id=? ORDER BY r.id", (draft_id,))]
+        for row in draft["reviews"]:
+            row["report"] = json.loads(row.pop("report_json")) if row["report_json"] else None
         draft["publications"] = [dict(r) for r in self.db.execute("SELECT * FROM publications WHERE draft_id=? ORDER BY version", (draft_id,))]
         draft["metrics"] = [dict(r) for r in self.db.execute("SELECT * FROM metrics WHERE draft_id=? ORDER BY observed_at", (draft_id,))]
         return draft

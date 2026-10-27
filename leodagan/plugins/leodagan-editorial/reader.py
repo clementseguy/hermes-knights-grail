@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
-MAX_BYTES = 1_000_000
+MAX_BYTES = 4_000_000
 MAX_TEXT = 30_000
 
 
@@ -95,14 +95,18 @@ def read_public_article(value: str) -> dict:
                 current = urljoin(current, location)
                 continue
             if response.status >= 400:
-                return {"url": current, "access_status": "inaccessible", "http_status": response.status,
-                        "accessed_at": datetime.now(timezone.utc).isoformat(), "error": f"HTTP {response.status}"}
+                return {"url": value, "final_url": current, "access_status": "inaccessible",
+                        "http_status": response.status, "accessed_at": datetime.now(timezone.utc).isoformat(),
+                        "reason": f"HTTP {response.status}"}
             kind = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
             if kind not in ("text/html", "text/plain"):
-                raise ValueError("type de contenu non textuel refusé")
+                return {"url": value, "final_url": current, "access_status": "inaccessible",
+                        "http_status": response.status, "accessed_at": datetime.now(timezone.utc).isoformat(),
+                        "reason": f"type de contenu non pris en charge : {kind or 'inconnu'}"}
             body = response.read(MAX_BYTES + 1)
-            if len(body) > MAX_BYTES:
-                raise ValueError("article trop volumineux")
+            body_truncated = len(body) > MAX_BYTES
+            if body_truncated:
+                body = body[:MAX_BYTES]
             content_type = response.getheader("Content-Type", "")
             charset = next((part.split("=", 1)[1].strip() for part in content_type.split(";")[1:]
                             if part.strip().lower().startswith("charset=")), "utf-8")
@@ -111,16 +115,21 @@ def read_public_article(value: str) -> dict:
                 parser = _Text()
                 parser.feed(decoded)
                 title = " ".join("".join(parser.title).split())[:300]
-                article = "\n\n".join(parser.lines)[:MAX_TEXT]
+                article = "\n\n".join(parser.lines)
             else:
                 title = ""
-                article = decoded[:MAX_TEXT]
-            return {"url": current, "access_status": "read" if len(article) >= 200 else "partial",
+                article = decoded
+            text_truncated = len(article) > MAX_TEXT
+            article = article[:MAX_TEXT]
+            partial = body_truncated or text_truncated or len(article) < 200
+            return {"url": value, "final_url": current, "access_status": "partial" if partial else "read",
                     "http_status": response.status, "accessed_at": datetime.now(timezone.utc).isoformat(),
-                    "title": title, "text": article, "truncated": len(article) >= MAX_TEXT}
+                    "title": title, "text": article, "truncated": body_truncated or text_truncated,
+                    "reason": "corps limité à 4 Mo" if body_truncated else "texte limité à 30 000 caractères" if text_truncated else ""}
         except (OSError, TimeoutError, ssl.SSLError, LookupError) as exc:
-            return {"url": current, "access_status": "inaccessible", "http_status": None,
-                    "accessed_at": datetime.now(timezone.utc).isoformat(), "error": type(exc).__name__}
+            return {"url": value, "final_url": current, "access_status": "inaccessible",
+                    "http_status": None, "accessed_at": datetime.now(timezone.utc).isoformat(),
+                    "reason": type(exc).__name__}
         finally:
             connection.close()
     raise ValueError("trop de redirections")

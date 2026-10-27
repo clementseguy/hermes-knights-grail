@@ -1,4 +1,4 @@
-# Traçabilité de Léodagan — 24 octobre 2026
+# Traçabilité de Léodagan — 27 octobre 2026
 
 `OK` désigne une preuve exécutée ; `partiel` une réalisation dont une condition de recette manque ; `non vérifié` une recette non exécutée. Les résultats distinguent tests locaux, Docker et messages réels de Clément.
 
@@ -28,6 +28,17 @@
 | F-022 | `store.py`, skill | `test_identifier_and_idempotence` ; `Store.get("rempart-agent")` après redémarrage ; nouveau fil Slack du 24 octobre | Brouillon Telegram retrouvé par Slack avec ID, version, post intégral exact et prompt intégral exact **OK** ; aucune nouvelle version créée. |
 | F-023 | Skill, `store.py`, schéma `__init__.py` | Note critique de `silex-bleu` relue dans SQLite | Thèse, preuves, limites, objection CTO et impact dirigeant enregistrés **OK sur un article** ; second article de qualité différente **non testé**. |
 | F-024 | Compose, script, skill, plugin | Demandes Slack et Telegram réelles ; `editorial_save`, réponses, sauvegarde, redémarrage, `Store.get` | `hermes-leodagan` sain ; `silex-bleu` et `rempart-agent` v1, posts et prompts livrés puis retrouvés après redémarrage **OK sur les deux canaux**. |
+| F-025 | `review.py`, `store.py`, skill, config | `test_review.py`, `test_store.py`, validation du plugin dans l'image épinglée ; appel Codex réel dans le staging ; flux des outils sur base temporaire | Appel distinct `openai-codex` / `gpt-5.6-terra` **OK** : source fictive non vérifiée bloquée ; enregistrement sans revue refusé ; sauvegarde du candidat approuvé exact **OK** sur base temporaire. Recette humaine par canal encore à faire. |
+
+## Durcissement P0 du 27 octobre
+
+`editorial_add_source` ajoute un lien à un dossier existant et le date sans modifier les versions antérieures. `editorial_read_source` conserve l'URL demandée, expose séparément `final_url`, rend les réponses 403 et les types non pris en charge explicites, et retourne `partial` lorsque les limites de 4 Mo ou 30 000 caractères coupent la lecture. Le registre migre de `user_version=1` à 2 avec les événements de sources et les relectures ; les versions anciennes restent sans lien de relecture. Pour chaque nouvelle version, `editorial_review` soumet le candidat à un appel Codex sans historique de rédaction et enregistre les avis DSI, CTO, RSSI, CEO et de provenance. `editorial_save` ne reçoit que l'identifiant et le `review_id` approuvé ; il refuse une relecture périmée, rejetée ou réutilisée.
+
+`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s leodagan/tests -q` : 17 tests réussis, dont migration, ajout de source en révision, URL finale, source partielle volumineuse, appel neuf du reviewer et refus sans relecture. `hermes plugins validate` dans l'image épinglée : validation et analyse de sécurité `safe`. La recette conversationnelle réelle et l'évaluation humaine du style restent distinctes de ces tests. Le PDF Slack refusé en 403 le 27 octobre reste un cas d'accès nécessitant une décision de scope et un lecteur PDF limité ; le texte fourni par Clément reste le repli.
+
+Après sauvegarde chiffrée vérifiée du volume de 19 Mio, une release de 757 736 octets a été préparée par `rsync --dry-run --stats` sous le budget de 50 Mio. Le conteneur a démarré directement depuis ce staging avant bascule de `current`. SQLite v2 : `PRAGMA integrity_check = ok`, 5 dossiers et 6 versions préservés, 7 événements de sources initialisés. Un appel de relecture réel a demandé une révision pour une source fictive non vérifiée (quatre rôles et provenance renseignés). Dans une base temporaire, l'outil a refusé `editorial_save` sans revue, accepté un nouveau lien, puis enregistré une version après revue approuvée. Le lecteur a lu un article public en HTTP 200 et signalé explicitement un HTTP 403. Après promotion de la release `20261027T212748Z`, Slack et Telegram étaient connectés ; conteneur `healthy`, aucun port publié, aucun redémarrage ou OOM, et aucune erreur critique dans les journaux durant l'observation initiale. La recette conversationnelle réelle avec Clément reste à effectuer.
+
+Un redémarrage contrôlé de la release active a ensuite rendu `healthy`, reconnecté Slack et Telegram, gardé SQLite intègre en version 2 et préservé les 5 dossiers et 6 versions ; aucune erreur critique n'a été observée dans la fenêtre de contrôle après redémarrage.
 
 ## Commandes et observations principales
 

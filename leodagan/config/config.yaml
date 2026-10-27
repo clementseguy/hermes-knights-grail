@@ -48,3 +48,10 @@ platforms:
 plugins:
   enabled: [leodagan-editorial]
   auto_update_check_hours: 0
+  entries:
+    leodagan-editorial:
+      llm:
+        allow_provider_override: true
+        allowed_providers: [openai-codex]
+        allow_model_override: true
+        allowed_models: [gpt-5.6-terra]

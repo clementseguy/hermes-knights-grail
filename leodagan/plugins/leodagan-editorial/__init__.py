@@ -2,6 +2,7 @@
 import json
 from .store import Store
 from .reader import read_public_article
+from .review import review_candidate
 
 
 def _handle(operation):
@@ -29,6 +30,30 @@ def _read(args, **_):
         return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
 
 
+def _review(args, llm):
+    store = Store()
+    review_id = None
+    try:
+        candidate = {"identifier": args["identifier"], "post": args["post"],
+                     "image_prompt": args["image_prompt"], "reasoning": args["reasoning"],
+                     "sources": args["sources"]}
+        prepared = store.prepare_review(**candidate)
+        review_id = prepared["review_id"]
+        report, provider, model = review_candidate(llm, candidate)
+        result = store.complete_review(review_id, report, provider, model)
+        return json.dumps({"success": True, "result": result}, ensure_ascii=False)
+    except (ValueError, KeyError, RuntimeError) as exc:
+        if review_id is not None:
+            store.fail_review(review_id, type(exc).__name__)
+        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
+    except Exception as exc:
+        if review_id is not None:
+            store.fail_review(review_id, type(exc).__name__)
+        return json.dumps({"success": False, "error": "relecture indisponible : " + type(exc).__name__}, ensure_ascii=False)
+    finally:
+        store.db.close()
+
+
 def register(ctx):
     text = lambda d: {"type": "string", "description": d}
     review_fields = {
@@ -40,6 +65,7 @@ def register(ctx):
     }
     source_fields = {
         "url": text("URL HTTPS exacte de l'article demandé"),
+        "final_url": text("URL finale après redirection, si différente de l'URL demandée"),
         "access_status": text("read, partial, inaccessible ou user"),
         "accessed_at": text("Horodatage ISO 8601 avec fuseau horaire"),
         "critical_review": {"type": "object", "properties": review_fields,
@@ -61,15 +87,26 @@ def register(ctx):
              "message_key": text("Identifiant unique du message"), "identifier": text("Identifiant à deux mots, facultatif")},
             ["intent", "urls", "platform", "thread", "message_key"]),
         _handle(lambda s, a: s.create(a["intent"], a["urls"], a["platform"], a["thread"], a["message_key"], a.get("identifier", ""))))
-    ctx.register_tool("editorial_save", "leodagan_editorial",
-        _schema("editorial_save", "Valider et enregistrer une version immuable avant livraison.",
-            {"identifier": text("Identifiant du brouillon"), "post": text("Post exact"),
-             "image_prompt": text("Prompt image 16:9"), "reasoning": text("Angle et incertitudes"),
+    ctx.register_tool("editorial_add_source", "leodagan_editorial",
+        _schema("editorial_add_source", "Ajouter un lien à un dossier existant avant une nouvelle version.",
+            {"identifier": text("Identifiant du brouillon"), "url": text("Nouveau lien HTTPS fourni ou confirmé par Clément")},
+            ["identifier", "url"]),
+        _handle(lambda s, a: s.add_source(a["identifier"], a["url"])))
+    ctx.register_tool("editorial_review", "leodagan_editorial",
+        _schema("editorial_review", "Soumettre le brouillon à une relecture LLM indépendante DSI, CTO, RSSI et CEO avant enregistrement.",
+            {"identifier": text("Identifiant du brouillon"), "post": text("Post candidat exact"),
+             "image_prompt": text("Prompt image candidat 16:9"), "reasoning": text("Angle et incertitudes"),
              "sources": {"type": "array", "items": {"type": "object",
-                                                    "properties": source_fields,
-                                                    "required": list(source_fields)}}},
+                                                     "properties": source_fields,
+                                                     "required": ["url", "access_status", "accessed_at", "critical_review"]}}},
             ["identifier", "post", "image_prompt", "reasoning", "sources"]),
-        _handle(lambda s, a: s.save(a["identifier"], a["post"], a["image_prompt"], a["reasoning"], a["sources"])))
+        lambda args, **_: _review(args, ctx.llm))
+    ctx.register_tool("editorial_save", "leodagan_editorial",
+        _schema("editorial_save", "Enregistrer uniquement le texte exact approuvé par une relecture indépendante.",
+            {"identifier": text("Identifiant du brouillon"),
+             "review_id": {"type": "integer", "description": "Identifiant de relecture APPROVED retourné par editorial_review"}},
+            ["identifier", "review_id"]),
+        _handle(lambda s, a: s.save(a["identifier"], a["review_id"])))
     ctx.register_tool("editorial_get", "leodagan_editorial",
         _schema("editorial_get", "Retrouver un brouillon et ses versions, ou les règles explicites.",
             {"identifier": text("Identifiant ; vide pour les règles")}, []),

@@ -42,6 +42,22 @@ class ReaderTests(unittest.TestCase):
                 self.assertEqual(result["access_status"], "inaccessible")
                 self.assertEqual(result["http_status"], status)
                 self.assertNotIn("text", result)
+                self.assertEqual(result["reason"], f"HTTP {status}")
+
+    def test_oversize_body_keeps_bounded_partial_text(self):
+        response = unittest.mock.MagicMock()
+        response.status = 200
+        response.getheader.side_effect = lambda key, default="": "text/plain; charset=utf-8" if key == "Content-Type" else default
+        response.read.return_value = b"A" * (reader.MAX_BYTES + 1)
+        connection = unittest.mock.MagicMock()
+        connection.getresponse.return_value = response
+        with patch.object(reader, "_public_https", return_value=(reader.urlparse("https://example.org/a"), "93.184.215.14")), \
+             patch.object(reader, "_PinnedHTTPS", return_value=connection):
+            result = reader.read_public_article("https://example.org/a")
+        self.assertEqual(result["access_status"], "partial")
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["text"]), reader.MAX_TEXT)
+        self.assertEqual(result["url"], "https://example.org/a")
 
     def test_revalidates_redirect_target(self):
         response = unittest.mock.MagicMock()
